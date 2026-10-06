@@ -1,0 +1,14 @@
+# Your actual network name -- never commit this. Copy secrets.h.example to
+# secrets.h and fill in your own value.
+secrets.h
+
+# Arduino / PlatformIO build junk
+build/
+.pio/
+*.o
+*.elf
+*.bin
+
+# OS noise
+.DS_Store
+Thumbs.db
