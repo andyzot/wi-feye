@@ -333,6 +333,20 @@
     ESP_RST_EFUSE, ESP_RST_PWR_GLITCH, ESP_RST_CPU_LOCKUP, so none of
     these get silently bucketed as "unknown" again. Bumped
     FIRMWARE_VERSION to "8.3".
+  - Build 8a (naming scheme switches here to WiFEyeV8a / WiFEyeV8b / ... per
+    build, instead of the old firmware-version-only numbering): Modes 1 and
+    2 now show the currently-selected target network on screen (a small
+    label over the floor plan in Mode 1, drawSsidLabel(); a new "SSID:"
+    line alongside Zone/RSSI in Mode 2's drawTrafficLight()) -- picked up
+    from activeTargetSsid, so it's always visible which network a given
+    session is actually surveying rather than having to remember it from
+    the picker screen. Added a target_ssid column (same activeTargetSsid
+    value) to both the Mode 1 survey CSV and the Mode 2 walk CSV, on SD and
+    on their internal-flash fallbacks, so the logged data itself records
+    which network each row belongs to. Also moved RSSI_GREEN_THRESHOLD from
+    -60 to -65 dBm, to better match conventional good/fair WiFi signal
+    bands -- affects the on-screen recommendation text and traffic-light
+    colour in all three modes. Renamed the sketch file to WiFEyeV8a.ino.
 */
 
 #include <SPI.h>
@@ -371,13 +385,13 @@ struct Mode3EventEntry;
 // Build 7: shown on the new Diagnostics screen (More menu) and worth
 // bumping by hand whenever a build is flashed, same spirit as the
 // Build 1/2/2.1/... notes in the big comment block above.
-#define FIRMWARE_VERSION "8.3"
+#define FIRMWARE_VERSION "8a"
 
 // RSSI thresholds (dBm):
 //   >= -60 dBm : good / green
 //   -60 to -75 : usable but weak / amber
 //   <  -75 dBm : poor / red
-const int RSSI_GREEN_THRESHOLD = -60;
+const int RSSI_GREEN_THRESHOLD = -65;
 const int RSSI_AMBER_THRESHOLD = -75;
 const int RSSI_NOT_FOUND = 1;   // sentinel — real RSSI values are always negative
 const int RSSI_PENDING = 2;     // sentinel — scan in progress, not a real RSSI value
@@ -1127,7 +1141,7 @@ void appendCsvLine(float xPercent, float yPercent, int rssi, float imgX, float i
   }
 
   if (!fileExists) {
-    f.println("sequence,storage,floorplan,x_percent,y_percent,img_x,img_y,timestamp,rssi_dbm");
+    f.println("sequence,storage,floorplan,x_percent,y_percent,img_x,img_y,timestamp,rssi_dbm,target_ssid");
   }
 
   globalLogSequence++;
@@ -1146,10 +1160,12 @@ void appendCsvLine(float xPercent, float yPercent, int rssi, float imgX, float i
   f.print(currentTimestamp());
   f.print(",");
   if (rssi == RSSI_NOT_FOUND) {
-    f.println("NOT_FOUND");
+    f.print("NOT_FOUND");
   } else {
-    f.println(rssi);
+    f.print(rssi);
   }
+  f.print(",");
+  f.println(activeTargetSsid);
   f.close();
 
   Serial.print("Logged to ");
@@ -1354,6 +1370,22 @@ void drawCrosshair() {
   tft.drawFastHLine(cx + gap, cy, armLen - gap, color);
   tft.drawFastVLine(cx, cy - armLen, armLen - gap, color);
   tft.drawFastVLine(cx, cy + gap, armLen - gap, color);
+}
+
+// Small label over the floor-plan image showing which network this survey
+// is targeting (Build A: the picker lets this change per-visit, so it's no
+// longer obvious from memory alone which SSID a given session is reading
+// against). Drawn last, like the crosshair, so it survives every redraw;
+// a filled background box keeps it legible over a busy/light floor plan.
+void drawSsidLabel() {
+  tft.setTextSize(1);
+  tft.setTextColor(ILI9341_WHITE);
+  int16_t x1, y1; uint16_t w, h;
+  String label = "SSID: " + activeTargetSsid;
+  tft.getTextBounds(label.c_str(), 0, 0, &x1, &y1, &w, &h);
+  tft.fillRect(0, 0, w + 8, h + 6, ILI9341_BLACK);
+  tft.setCursor(4, 4);
+  tft.print(label);
 }
 
 // Pulls the strongest RSSI for activeTargetSsid (Build 8: the network
@@ -2270,6 +2302,7 @@ void mode1Loop() {
       drawSurveyPoints();
       drawZoomControls();
       drawCrosshair();
+      drawSsidLabel();
       needsRedraw = false;
       lastRenderMs = now;
     }
@@ -2923,7 +2956,7 @@ void appendWalkCsvLineToFallback(const char *event, int zone, int rssi, int avgR
     return;
   }
   if (!fileExists) {
-    f.println("sequence,storage,event,zone,timestamp,rssi_dbm,avg_rssi_dbm,recommendation");
+    f.println("sequence,storage,event,zone,timestamp,rssi_dbm,avg_rssi_dbm,recommendation,target_ssid");
   }
   globalLogSequence++;
   f.print(globalLogSequence);
@@ -2942,7 +2975,9 @@ void appendWalkCsvLineToFallback(const char *event, int zone, int rssi, int avgR
   f.print(",");
   f.print(avgRssi);
   f.print(",");
-  f.println(recommendation);
+  f.print(recommendation);
+  f.print(",");
+  f.println(activeTargetSsid);
   f.close();
   Serial.println("Mode 2: SD write failed (or no card) — line saved to internal flash fallback instead (/walk_survey_fallback.csv)");
 }
@@ -2983,7 +3018,7 @@ void appendWalkCsvLine(const char *event, int zone, int rssi, int avgRssi, const
     return;
   }
   if (!fileExists) {
-    f.println("sequence,storage,event,zone,timestamp,rssi_dbm,avg_rssi_dbm,recommendation");
+    f.println("sequence,storage,event,zone,timestamp,rssi_dbm,avg_rssi_dbm,recommendation,target_ssid");
   }
   globalLogSequence++;
   f.print(globalLogSequence);
@@ -3002,7 +3037,9 @@ void appendWalkCsvLine(const char *event, int zone, int rssi, int avgRssi, const
   f.print(",");
   f.print(avgRssi);
   f.print(",");
-  f.println(recommendation);
+  f.print(recommendation);
+  f.print(",");
+  f.println(activeTargetSsid);
   f.close();
 }
 
@@ -3048,6 +3085,10 @@ void drawTrafficLight(int band, int displayRssi, bool notFound) {
     tft.print(displayRssi);
     tft.print(" dBm");
   }
+
+  tft.setCursor(5, 16);
+  tft.print("SSID: ");
+  tft.print(activeTargetSsid);
 
   tft.setCursor(5, 225);
   tft.print(app.piezoMuted ? "Piezo: muted" : "Piezo: on");

@@ -31,7 +31,7 @@ Needs the Arduino IDE (or arduino-cli) with the ESP32 board package, plus:
 `WiFiProv`, `WebServer`, `Adafruit_GFX`, `Adafruit_ILI9341`,
 `XPT2046_Touchscreen`, `TJpg_Decoder` — all available via Library Manager.
 
-No per-build configuration needed — just open `wifeye.ino` and flash it.
+No per-build configuration needed — just open the `.ino` file and flash it.
 Modes 1 and 2 (which scan for a network's signal while you walk around)
 let you tap which nearby network to survey each time you enter them, from
 an on-screen list built from a live scan — no network name is ever
@@ -50,8 +50,8 @@ plain-text summary from there too.
 ## CSV formats
 
 - **Monitor (Mode 3):** `sequence,storage,timestamp,event,rssi_dbm,recommendation`
-- **Walk (Mode 2):** `sequence,storage,event,zone,timestamp,rssi_dbm,avg_rssi_dbm,recommendation`
-- **Survey (Mode 1):** `sequence,storage,floorplan,x_percent,y_percent,img_x,img_y,timestamp,rssi_dbm`
+- **Walk (Mode 2):** `sequence,storage,event,zone,timestamp,rssi_dbm,avg_rssi_dbm,recommendation,target_ssid`
+- **Survey (Mode 1):** `sequence,storage,floorplan,x_percent,y_percent,img_x,img_y,timestamp,rssi_dbm,target_ssid`
 - **Boot log (`/boot_log.csv`, every boot, any mode):** `sequence,storage,timestamp,reset_reason_code,reset_reason_label`
 
 ## Status
