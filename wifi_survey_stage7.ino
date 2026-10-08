@@ -244,15 +244,37 @@
     blame the AP for something this device's own periodic scan may have
     caused.
   - Bumped FIRMWARE_VERSION to "7.5".
-  - Build 7.6: after a field crash during Mode 1 (red-button tap logged a
-    point, unit fully rebooted) that didn't reproduce when reconnected over
-    USB for serial output -- itself a clue, since USB supplies steadier
-    power than the battery chain does -- added printResetReason(), printed
-    first thing in setup() via esp_reset_reason(). This distinguishes a
-    BROWNOUT (supply voltage sagged too low, e.g. a WiFi-scan current spike
-    on a marginal/aging battery) from a PANIC, a task/interrupt watchdog
-    timeout, or an ordinary power-on/software reset -- so the next crash,
-    if there is one, says which kind it was instead of just "it rebooted".
+  - Build 7.6, two scoped fixes shipped together:
+    1. Reset-reason logging: after a field crash during Mode 1 (red-button
+       tap logged a point, unit fully rebooted) that didn't reproduce when
+       reconnected over USB for serial output -- itself a clue, since USB
+       supplies steadier power than the battery chain does -- added
+       printResetReason(), printed first thing in setup() via
+       esp_reset_reason(). This distinguishes a BROWNOUT (supply voltage
+       sagged too low, e.g. a WiFi-scan current spike on a marginal/aging
+       battery) from a PANIC, a task/interrupt watchdog timeout, or an
+       ordinary power-on/software reset -- so the next crash, if there is
+       one, says which kind it was instead of just "it rebooted".
+    2. Same-radio/multi-SSID grouping (the fix actually agreed on first,
+       from reviewing Mode 3 field logs across multiple rooms/APs): this
+       site's enterprise APs each broadcast several SSIDs off one
+       physical radio (e.g. CFG_Team/CFG_Guest/CFG_RZ/Zorba/Major-Clks all
+       sharing one base MAC, confirmed on two separate AP units in two
+       different rooms). countMode3NearbyApsOnChannel(),
+       buildNearbyApSummary(), and buildChannelSurvey() previously only
+       excluded an exact SSID match against the connected network, so a
+       single AP broadcasting five SSIDs was counted as five separate
+       competing networks -- badly overstating channel congestion and
+       sometimes recommending a channel switch with no real benefit
+       behind it. New isSiblingRadio() helper matches the first 5 BSSID
+       octets (vendor+device prefix) against the connected AP's own BSSID
+       and excludes those too, in both the "X other networks on this
+       channel" count and the CHANNEL_SURVEY per-channel tally. Scoped to
+       Mode 3 (the only mode that actually connects, and the only one
+       with logged NEARBY_APS/CHANNEL_SURVEY evidence of the problem) --
+       Mode 2's analogous countNearbyApsOnChannel() has the same
+       exact-SSID-only gap but was left untouched here, flagged as a
+       candidate for later rather than widened without its own evidence.
     Bumped FIRMWARE_VERSION to "7.6".
 */
 
@@ -3422,18 +3444,41 @@ void forgetMode3NetworkAndRestart() {
   ESP.restart();
 }
 
+// Build 7.6: recognizes sibling BSSIDs -- same physical AP radio as the
+// one we're connected to, broadcasting a different SSID -- so they don't
+// get double-counted as separate competing networks. Confirmed during
+// field testing across multiple rooms/APs: this site's enterprise AP
+// deployment has every physical radio broadcasting several SSIDs at once
+// (e.g. CFG_Team/CFG_Guest/CFG_RZ/Zorba/Major-Clks all sharing one base
+// MAC, differing only in the last octet), which is normal, intentional AP
+// configuration, not real channel contention. Matches on the first 5
+// octets (vendor+device prefix) of the BSSID -- sibling radios from the
+// same hardware share those, differing only in the last byte.
+bool isSiblingRadio(int i, const uint8_t *myBssid) {
+  if (myBssid == nullptr) return false;
+  uint8_t *bssid = WiFi.BSSID(i);
+  if (bssid == nullptr) return false;
+  for (int o = 0; o < 5; o++) {
+    if (bssid[o] != myBssid[o]) return false;
+  }
+  return true;
+}
+
 // Like countNearbyApsOnChannel(), but excludes whatever network Mode 3 is
 // actually connected to rather than the hardcoded TARGET_SSID — Mode 3
 // connects to whatever SSID/password was entered via the SoftAP Prov app,
 // which won't always be TARGET_SSID (that constant is Modes 1/2's fixed
 // survey target). Without this, our own AP's beacon showing up in the
 // scan would get miscounted as a "competing" network on its own channel.
-int countMode3NearbyApsOnChannel(int n, int targetChannel) {
+// Build 7.6: also excludes sibling BSSIDs (see isSiblingRadio() above) so
+// a single AP broadcasting several SSIDs isn't counted several times.
+int countMode3NearbyApsOnChannel(int n, int targetChannel, const uint8_t *myBssid) {
   if (targetChannel <= 0) return 0;
   String mySSID = WiFi.SSID();
   int count = 0;
   for (int i = 0; i < n; i++) {
     if (WiFi.SSID(i) == mySSID) continue;
+    if (isSiblingRadio(i, myBssid)) continue;
     if (WiFi.channel(i) == targetChannel && WiFi.RSSI(i) > -80) count++;
   }
   return count;
@@ -3498,7 +3543,11 @@ void syncRtcFromNtp() {
 // by "; ", for a NEARBY_APS log row -- capped so a crowded channel doesn't
 // blow up the CSV, and a hidden (empty) SSID is shown as "<hidden>" rather
 // than an empty, CSV-parser-confusing field.
-String buildNearbyApSummary(int n, int targetChannel, const String &mySSID) {
+// Build 7.6: also takes myBssid so sibling radios (see isSiblingRadio()
+// above) are excluded here too -- otherwise a NEARBY_APS row would still
+// list an AP's own other SSIDs as if they were separate neighbors, even
+// after the count itself was fixed.
+String buildNearbyApSummary(int n, int targetChannel, const String &mySSID, const uint8_t *myBssid) {
   if (targetChannel <= 0) return "";
   const int MAX_LOGGED = 5;
   int keptIdx[MAX_LOGGED];
@@ -3507,6 +3556,7 @@ String buildNearbyApSummary(int n, int targetChannel, const String &mySSID) {
 
   for (int i = 0; i < n; i++) {
     if (WiFi.SSID(i) == mySSID) continue;
+    if (isSiblingRadio(i, myBssid)) continue;
     if (WiFi.channel(i) != targetChannel) continue;
     int rssi = WiFi.RSSI(i);
     if (keptCount < MAX_LOGGED) {
@@ -3564,11 +3614,16 @@ String buildNearbyApSummary(int n, int targetChannel, const String &mySSID) {
 // channel, not actual traffic/airtime utilization, and the ESP32-S3's
 // radio is 2.4GHz only -- it cannot see a 5GHz network at all, even one
 // broadcast by the same router right next to the one being measured.
-String buildChannelSurvey(int n, int currentChannel, int *outRecommended) {
+// Build 7.6: also takes myBssid so the per-channel tally excludes sibling
+// radios (see isSiblingRadio() above), not just an exact SSID match --
+// otherwise a single AP's other SSIDs still inflated the count on
+// whichever channel it sits on, even on channels other than our own.
+String buildChannelSurvey(int n, int currentChannel, int *outRecommended, const uint8_t *myBssid) {
   String mySSID = WiFi.SSID();
   int counts[14] = {0};   // index 1..13 used; 0 left unused for readability
   for (int i = 0; i < n; i++) {
     if (WiFi.SSID(i) == mySSID) continue;
+    if (isSiblingRadio(i, myBssid)) continue;
     int ch = WiFi.channel(i);
     if (ch < 1 || ch > 13) continue;
     if (WiFi.RSSI(i) > -80) counts[ch]++;
@@ -3614,14 +3669,19 @@ void checkMode3CongestionScan() {
     Serial.println("Mode 3: congestion scan failed");
   } else {
     int channel = WiFi.channel();   // current AP's channel — already connected, no need to find it in the scan
+    // Build 7.6: copied into a local array (rather than passing WiFi.BSSID()'s
+    // pointer straight through) so it stays valid across the several calls
+    // below regardless of what WiFi.* internally does between them.
+    uint8_t myBssid[6];
+    memcpy(myBssid, WiFi.BSSID(), 6);
     mode3CongestionChannel = channel;
-    mode3NearbyApCount = countMode3NearbyApsOnChannel(n, channel);
-    mode3NearbyApSummary = buildNearbyApSummary(n, channel, WiFi.SSID());
+    mode3NearbyApCount = countMode3NearbyApsOnChannel(n, channel, myBssid);
+    mode3NearbyApSummary = buildNearbyApSummary(n, channel, WiFi.SSID(), myBssid);
     Serial.print("Mode 3: congestion check — channel ");
     Serial.print(channel);
     Serial.print(", ");
     Serial.print(mode3NearbyApCount);
-    Serial.println(" competing network(s) on it");
+    Serial.println(" competing network(s) on it (sibling SSIDs on our own AP excluded)");
     // Build 7 item 4: its own row, logged once per completed scan (every
     // MODE3_CONGESTION_CHECK_INTERVAL_MS while connected) rather than on
     // every SAMPLE row, so detailed per-neighbor data doesn't bloat the
@@ -3631,7 +3691,7 @@ void checkMode3CongestionScan() {
     }
     // Build 7.1: the full per-channel tally -- see buildChannelSurvey()'s
     // own comment for what this can and can't tell you.
-    String channelSurvey = buildChannelSurvey(n, channel, &mode3RecommendedChannel);
+    String channelSurvey = buildChannelSurvey(n, channel, &mode3RecommendedChannel, myBssid);
     appendMonitorLogLine("CHANNEL_SURVEY", RSSI_NOT_FOUND, channelSurvey);
   }
   WiFi.scanDelete();
