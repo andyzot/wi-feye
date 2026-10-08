@@ -312,6 +312,18 @@
 #include "wifeye_logo_data.h"   // Wi-FEye boot logo, baked into flash (see showBootScreen)
 #include "secrets.h"            // defines TARGET_SSID for your own network -- see secrets.h.example; secrets.h itself is gitignored so it never gets committed
 
+// Forward declaration, needed only because of how Arduino compiles a .ino:
+// it auto-generates a prototype for every function in the sketch and
+// inserts them all right here, immediately after the #include block --
+// long before Mode3EventEntry's own definition further down (see
+// pushMode3Event()/popMode3Event(), which take it by reference). Without
+// this, those auto-generated prototypes reference a type that doesn't
+// exist yet at this point in the file, and the sketch fails to compile
+// with "'Mode3EventEntry' does not name a type". A plain forward
+// declaration is enough here since the auto-generated prototypes only
+// need a reference to the type, not its full definition.
+struct Mode3EventEntry;
+
 // Build 7: shown on the new Diagnostics screen (More menu) and worth
 // bumping by hand whenever a build is flashed, same spirit as the
 // Build 1/2/2.1/... notes in the big comment block above.
