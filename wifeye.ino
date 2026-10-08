@@ -324,6 +324,15 @@
     and removed the secrets.h entry from .gitignore. No per-build
     configuration is needed anymore -- the sketch just compiles and
     flashes as-is. Bumped FIRMWARE_VERSION to "8.2".
+  - Build 8.3: resetReasonLabel()'s switch only covered the original
+    esp_reset_reason_t values (POWERON..SDIO), so a real battery-crash
+    boot_log.csv entry with reset_reason_code 11 fell through to
+    "unknown" -- 11 is actually ESP_RST_USB, a reset caused by the USB
+    peripheral itself (e.g. a serial connect/disconnect), not a crash at
+    all. Added the missing cases: ESP_RST_USB, ESP_RST_JTAG,
+    ESP_RST_EFUSE, ESP_RST_PWR_GLITCH, ESP_RST_CPU_LOCKUP, so none of
+    these get silently bucketed as "unknown" again. Bumped
+    FIRMWARE_VERSION to "8.3".
 */
 
 #include <SPI.h>
@@ -362,7 +371,7 @@ struct Mode3EventEntry;
 // Build 7: shown on the new Diagnostics screen (More menu) and worth
 // bumping by hand whenever a build is flashed, same spirit as the
 // Build 1/2/2.1/... notes in the big comment block above.
-#define FIRMWARE_VERSION "8.2"
+#define FIRMWARE_VERSION "8.3"
 
 // RSSI thresholds (dBm):
 //   >= -60 dBm : good / green
@@ -1860,6 +1869,11 @@ const char* resetReasonLabel(esp_reset_reason_t reason) {
     case ESP_RST_DEEPSLEEP: return "woke from deep sleep";
     case ESP_RST_BROWNOUT:  return "BROWNOUT -- supply voltage dropped too low (battery/current-spike related, not firmware)";
     case ESP_RST_SDIO:      return "SDIO reset";
+    case ESP_RST_USB:       return "USB peripheral reset (e.g. serial connect/disconnect) -- not a crash";
+    case ESP_RST_JTAG:      return "JTAG reset";
+    case ESP_RST_EFUSE:     return "efuse error reset";
+    case ESP_RST_PWR_GLITCH: return "power glitch detected";
+    case ESP_RST_CPU_LOCKUP: return "CPU lock-up reset";
     default:                return "unknown";
   }
 }
