@@ -1837,7 +1837,7 @@ void setup() {
 
   Serial.begin(115200);
   delay(1000);
-  Serial.print("=== WiFi survey (Stage 7, firmware "); Serial.print(FIRMWARE_VERSION); Serial.println(") ==="); // was a hardcoded "Stage 6" left over from before this file was renamed/rebuilt -- now prints the actual FIRMWARE_VERSION so the boot banner can't silently drift from reality again
+  Serial.print("=== Wi-FEye, firmware "); Serial.print(FIRMWARE_VERSION); Serial.println(" ==="); // Build 8: dropped the hardcoded "Stage 7" label (a leftover from before FIRMWARE_VERSION existed, and stale again after Build 8's version bump) -- FIRMWARE_VERSION alone is the one label that's actually kept up to date, so the banner no longer carries a second, separately-tracked name alongside it
   printResetReason();
   // Build 8: this is only the compiled-in DEFAULT now -- Modes 1/2 let you
   // pick a different network to survey on-screen each time you enter
