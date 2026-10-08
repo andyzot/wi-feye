@@ -276,6 +276,24 @@
        exact-SSID-only gap but was left untouched here, flagged as a
        candidate for later rather than widened without its own evidence.
     Bumped FIRMWARE_VERSION to "7.6".
+  - Build 8: on-screen target-network picker for Modes 1/2. Until now,
+    TARGET_SSID (secrets.h) was the ONLY network Modes 1/2 could ever
+    survey, requiring a recompile+reflash every time this device moved to
+    a site with a different network name -- a real problem now that it's
+    being used away from home (e.g. a food manufacturer's site). Since
+    Modes 1/2 never actually associate with the network (only scan for its
+    beacon and read its RSSI), there's no need for the target to be fixed
+    at compile time. Added activeTargetSsid, chosen at runtime from a
+    tap-to-pick list built from a live scan (scanNetworksForPicker(),
+    drawNetworkList(), selectTargetNetwork()), wired into enterMode() so
+    it's prompted once per fresh entry into Mode 1 or 2 from the mode
+    menu (not on every Green-button floor-plan switch within Mode 1,
+    which stays on the same network as before). Lists each visible
+    non-hidden SSID once (deduped, strongest-signal reading kept),
+    strongest-first, with RSSI shown per row; Green at the picker backs
+    out to the mode menu, same convention as the floor-plan and mode
+    pickers. TARGET_SSID itself is unchanged and still used as the
+    compiled-in default shown at boot. Bumped FIRMWARE_VERSION to "8.0".
 */
 
 #include <SPI.h>
@@ -297,7 +315,7 @@
 // Build 7: shown on the new Diagnostics screen (More menu) and worth
 // bumping by hand whenever a build is flashed, same spirit as the
 // Build 1/2/2.1/... notes in the big comment block above.
-#define FIRMWARE_VERSION "7.6"
+#define FIRMWARE_VERSION "8.0"
 
 // RSSI thresholds (dBm):
 //   >= -60 dBm : good / green
@@ -539,6 +557,25 @@ char floorplanNames[MAX_FLOORPLANS][40];
 int floorplanCount = 0;
 const int LIST_TOP = 30;
 int ROW_H = 30;   // recomputed to fill the screen once floorplanCount is known — see scanFloorPlans()
+
+// --- Build 8: on-screen target-network picker for Modes 1/2 ---
+// TARGET_SSID (from secrets.h) used to be the ONLY network Modes 1/2 could
+// ever survey — fine for a single site, but it meant a recompile+reflash
+// every time this device moved to a different location with a different
+// network name (e.g. home's "Poohcorner2" vs a site's "Guest123"). Since
+// Modes 1/2 never actually associate with the network (they only scan for
+// its beacon and read its RSSI), there's no real need to hardcode it:
+// activeTargetSsid is chosen at runtime instead, from a tap-to-pick list
+// built from a live scan — see scanNetworksForPicker()/selectTargetNetwork()
+// below, wired up in enterMode(). TARGET_SSID itself is untouched and still
+// used as the printed-at-boot default; it's just no longer the only option.
+String activeTargetSsid = String(TARGET_SSID);
+#define MAX_SURVEY_NETWORKS 8   // how many fit on screen at once, same idea as MAX_FLOORPLANS
+char surveyNetworkNames[MAX_SURVEY_NETWORKS][33];   // SSIDs are at most 32 chars + null terminator
+int surveyNetworkRssi[MAX_SURVEY_NETWORKS];
+int surveyNetworkCount = 0;
+const int NET_LIST_TOP = 30;
+int netRowH = 30;   // recomputed to fill the screen once surveyNetworkCount is known — see scanNetworksForPicker()
 
 // --- On-screen zoom controls: a tall column down the right edge (R / - / +
 // stacked top to bottom), rather than three narrow squares crammed into a
@@ -1261,12 +1298,14 @@ void drawCrosshair() {
   tft.drawFastVLine(cx, cy + gap, armLen - gap, color);
 }
 
-// Pulls the strongest RSSI for TARGET_SSID out of an already-completed
-// scan's results (n entries), or RSSI_NOT_FOUND if it wasn't in range.
+// Pulls the strongest RSSI for activeTargetSsid (Build 8: the on-screen-
+// picked network, defaulting to TARGET_SSID until changed) out of an
+// already-completed scan's results (n entries), or RSSI_NOT_FOUND if it
+// wasn't in range.
 int bestRssiFromScan(int n) {
   int bestRssi = RSSI_NOT_FOUND;
   for (int i = 0; i < n; i++) {
-    if (WiFi.SSID(i) == TARGET_SSID) {
+    if (WiFi.SSID(i) == activeTargetSsid) {
       int rssi = WiFi.RSSI(i);
       if (bestRssi == RSSI_NOT_FOUND || rssi > bestRssi) {
         bestRssi = rssi;
@@ -1318,7 +1357,7 @@ void checkPendingScan() {
   drawSurveyPoints();   // redraw this point in its real color
 
   Serial.print("SSID '");
-  Serial.print(TARGET_SSID);
+  Serial.print(activeTargetSsid);
   Serial.print("' RSSI: ");
   if (rssi == RSSI_NOT_FOUND) {
     Serial.println("not found");
@@ -1405,6 +1444,183 @@ void logSurveyPoint(int16_t screenX, int16_t screenY) {
   pendingYPercent = yPercent;
   pendingImgX = imgX;
   pendingImgY = imgY;
+}
+
+// --- Build 8: on-screen target-network picker (Modes 1/2) ---
+// Scans for nearby networks and builds a deduped, strongest-signal-first
+// list for selectTargetNetwork() to show. Kicks the scan off async and
+// polls scanComplete() rather than calling WiFi.scanNetworks() directly --
+// that blocks for ~2-3s, which has bitten this project before (see the
+// "async scan state" comment near app.scanPending); worth avoiding here
+// too even though this screen has nothing else that needs to keep running
+// underneath it.
+void scanNetworksForPicker() {
+  surveyNetworkCount = 0;
+
+  tft.fillScreen(ILI9341_BLACK);
+  tft.setTextColor(ILI9341_WHITE);
+  tft.setTextSize(2);
+  tft.setCursor(10, 100);
+  tft.println("Scanning for networks...");
+
+  WiFi.scanNetworks(true);
+  int n;
+  while ((n = WiFi.scanComplete()) == WIFI_SCAN_RUNNING) {
+    delay(50);
+  }
+
+  if (n == WIFI_SCAN_FAILED) {
+    Serial.println("Network picker: scan failed");
+    WiFi.scanDelete();
+    return;
+  }
+
+  Serial.print("Network picker: ");
+  Serial.print(n);
+  Serial.println(" network(s) seen");
+
+  for (int i = 0; i < n; i++) {
+    String ssid = WiFi.SSID(i);
+    if (ssid.length() == 0) continue;   // hidden SSID -- nothing to tap/match later, so leave it out rather than show an unselectable row
+    int rssi = WiFi.RSSI(i);
+
+    // Same SSID already in the list (another AP/channel broadcasting it) --
+    // keep only the strongest reading, same spirit as the sibling-radio
+    // grouping added for Mode 3 in Build 7.6, just simpler (exact-SSID
+    // only; this list is for picking a name to type into a scan filter,
+    // not for congestion counting).
+    int existing = -1;
+    for (int k = 0; k < surveyNetworkCount; k++) {
+      if (ssid == surveyNetworkNames[k]) { existing = k; break; }
+    }
+    if (existing >= 0) {
+      if (rssi > surveyNetworkRssi[existing]) surveyNetworkRssi[existing] = rssi;
+      continue;
+    }
+
+    if (surveyNetworkCount < MAX_SURVEY_NETWORKS) {
+      ssid.toCharArray(surveyNetworkNames[surveyNetworkCount], sizeof(surveyNetworkNames[surveyNetworkCount]));
+      surveyNetworkRssi[surveyNetworkCount] = rssi;
+      surveyNetworkCount++;
+    } else {
+      // List's full -- same bounded "keep the strongest, drop the
+      // weakest" trick as buildNearbyApSummary() rather than just
+      // ignoring every network seen after the first MAX_SURVEY_NETWORKS.
+      int weakestPos = 0;
+      for (int k = 1; k < surveyNetworkCount; k++) {
+        if (surveyNetworkRssi[k] < surveyNetworkRssi[weakestPos]) weakestPos = k;
+      }
+      if (rssi > surveyNetworkRssi[weakestPos]) {
+        ssid.toCharArray(surveyNetworkNames[weakestPos], sizeof(surveyNetworkNames[weakestPos]));
+        surveyNetworkRssi[weakestPos] = rssi;
+      }
+    }
+  }
+  WiFi.scanDelete();
+
+  // Strongest signal first -- small insertion sort, surveyNetworkCount is
+  // at most MAX_SURVEY_NETWORKS.
+  for (int a = 1; a < surveyNetworkCount; a++) {
+    char tName[33];
+    strncpy(tName, surveyNetworkNames[a], sizeof(tName));
+    int tRssi = surveyNetworkRssi[a];
+    int b = a - 1;
+    while (b >= 0 && surveyNetworkRssi[b] < tRssi) {
+      strncpy(surveyNetworkNames[b + 1], surveyNetworkNames[b], sizeof(surveyNetworkNames[b + 1]));
+      surveyNetworkRssi[b + 1] = surveyNetworkRssi[b];
+      b--;
+    }
+    strncpy(surveyNetworkNames[b + 1], tName, sizeof(surveyNetworkNames[b + 1]));
+    surveyNetworkRssi[b + 1] = tRssi;
+  }
+
+  if (surveyNetworkCount == 0) {
+    Serial.println("Network picker: no (non-hidden) networks found");
+  }
+}
+
+void drawNetworkList() {
+  tft.fillScreen(ILI9341_BLACK);
+  tft.setTextColor(ILI9341_WHITE);
+  tft.setTextSize(1);
+  tft.setCursor(5, 5);
+  tft.println("Select network to survey:");
+
+  if (surveyNetworkCount == 0) {
+    tft.setCursor(5, NET_LIST_TOP);
+    tft.println("No networks found nearby");
+    return;
+  }
+
+  int available = SCREEN_H - NET_LIST_TOP - 4;
+  netRowH = available / surveyNetworkCount;
+  if (netRowH > 44) netRowH = 44;
+  if (netRowH < 22) netRowH = 22;
+
+  for (int i = 0; i < surveyNetworkCount; i++) {
+    int y = NET_LIST_TOP + i * netRowH;
+    tft.fillRect(2, y, SCREEN_W - 4, netRowH - 2, ILI9341_NAVY);
+    tft.drawRect(2, y, SCREEN_W - 4, netRowH - 2, ILI9341_WHITE);
+    tft.setTextSize(2);
+    tft.setCursor(8, y + (netRowH - 2) / 2 - 8);
+
+    // Leave room on the right for the " -NNdBm" suffix -- truncate long
+    // SSIDs rather than let them run into it or off the screen edge.
+    char displayName[19];
+    strncpy(displayName, surveyNetworkNames[i], sizeof(displayName) - 1);
+    displayName[sizeof(displayName) - 1] = '\0';
+    tft.print(displayName);
+    tft.print(" ");
+    tft.print(surveyNetworkRssi[i]);
+    tft.println("dBm");
+  }
+  tft.setTextSize(1);   // restore default used elsewhere
+}
+
+// Blocks until the user taps a listed network -- same convention as
+// selectFloorplan(): returns the chosen index, -1 if there was nothing to
+// choose from, or -2 if Green was pressed to go back to the mode menu
+// instead of picking one.
+int selectTargetNetwork() {
+  scanNetworksForPicker();
+  drawNetworkList();
+  if (surveyNetworkCount == 0) {
+    delay(3000);
+    return -1;
+  }
+
+  while (true) {
+    if (digitalRead(BTN_GREEN) == LOW) {
+      waitForRelease(BTN_GREEN);
+      return -2;
+    }
+
+    if (touch.touched()) {
+      TS_Point p = touch.getPoint();
+      if (isInvalidTouch(p)) {
+        delay(20);
+        continue;
+      }
+      int16_t sx, sy;
+      mapTouch(p, sx, sy);
+
+      // Same hit-test convention as selectFloorplan(): split at the
+      // midpoint between rows, first row's top and last row's bottom
+      // extended to the true screen edges.
+      for (int i = 0; i < surveyNetworkCount; i++) {
+        int hitTop = (i == 0) ? 0 : (NET_LIST_TOP + i * netRowH - netRowH / 2);
+        int hitBottom = (i == surveyNetworkCount - 1) ? SCREEN_H : (NET_LIST_TOP + (i + 1) * netRowH - netRowH / 2);
+        if (sy >= hitTop && sy < hitBottom) {
+          while (touch.touched()) delay(10);   // wait for finger to lift
+          Serial.print("Target network selected: ");
+          Serial.println(surveyNetworkNames[i]);
+          return i;
+        }
+      }
+      delay(150);   // debounce a tap that landed between rows
+    }
+    delay(20);
+  }
 }
 
 // Shows the picker, loads whichever floor plan is chosen, and sets up the
@@ -1623,7 +1839,10 @@ void setup() {
   delay(1000);
   Serial.print("=== WiFi survey (Stage 7, firmware "); Serial.print(FIRMWARE_VERSION); Serial.println(") ==="); // was a hardcoded "Stage 6" left over from before this file was renamed/rebuilt -- now prints the actual FIRMWARE_VERSION so the boot banner can't silently drift from reality again
   printResetReason();
-  Serial.print("Target SSID: ");
+  // Build 8: this is only the compiled-in DEFAULT now -- Modes 1/2 let you
+  // pick a different network to survey on-screen each time you enter
+  // them, via activeTargetSsid (see selectTargetNetwork()/enterMode()).
+  Serial.print("Default target SSID (Modes 1/2, until changed on-screen): ");
   Serial.println(TARGET_SSID);
 
   pinMode(BTN_YELLOW, INPUT_PULLUP);
@@ -2366,8 +2585,37 @@ int selectMode() {
 
 // Dispatches to whichever mode was chosen — shared by setup() and every
 // "back to mode menu" path so they all start that mode the same way.
+// Build 8: Modes 1/2 get an extra step first -- picking which network to
+// survey (see selectTargetNetwork() above) -- since they no longer only
+// ever look for the hardcoded TARGET_SSID. Deliberately placed here
+// rather than inside pickAndLoadFloorPlan() itself, since that function is
+// also called again by Mode 1's own Green button (switch floor plan,
+// same network); re-prompting for a network on every floor-plan switch
+// would be a needless extra tap for the common case of staying at one
+// site and only wanting a different plan.
 void enterMode(int mode) {
   app.currentMode = mode;
+  if (mode == 1 || mode == 2) {
+    int chosen = selectTargetNetwork();
+    if (chosen == -2) {
+      // Green pressed at the picker -- back to the mode menu, same
+      // convention as the floor-plan and mode-select screens.
+      Serial.println("Returning to mode menu...");
+      enterMode(selectMode());
+      return;
+    }
+    if (chosen < 0) {
+      // No networks found nearby -- nothing to survey either way, so
+      // there's no point entering Mode 1/2 at all.
+      Serial.println("No networks to survey — returning to mode menu...");
+      enterMode(selectMode());
+      return;
+    }
+    activeTargetSsid = String(surveyNetworkNames[chosen]);
+    Serial.print("Active target SSID for this session: ");
+    Serial.println(activeTargetSsid);
+  }
+
   if (mode == 1) pickAndLoadFloorPlan();
   else if (mode == 2) startMode2();
   else if (mode == 3) startMode3();
@@ -2418,7 +2666,7 @@ int bestRssiAndChannel(int n, int &channelOut) {
   int bestRssi = RSSI_NOT_FOUND;
   channelOut = -1;
   for (int i = 0; i < n; i++) {
-    if (WiFi.SSID(i) == TARGET_SSID) {
+    if (WiFi.SSID(i) == activeTargetSsid) {
       int rssi = WiFi.RSSI(i);
       if (bestRssi == RSSI_NOT_FOUND || rssi > bestRssi) {
         bestRssi = rssi;
@@ -2437,7 +2685,7 @@ int countNearbyApsOnChannel(int n, int targetChannel) {
   if (targetChannel <= 0) return 0;
   int count = 0;
   for (int i = 0; i < n; i++) {
-    if (WiFi.SSID(i) == TARGET_SSID) continue;
+    if (WiFi.SSID(i) == activeTargetSsid) continue;
     if (WiFi.channel(i) == targetChannel && WiFi.RSSI(i) > -80) count++;
   }
   return count;
