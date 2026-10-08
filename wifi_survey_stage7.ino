@@ -244,6 +244,16 @@
     blame the AP for something this device's own periodic scan may have
     caused.
   - Bumped FIRMWARE_VERSION to "7.5".
+  - Build 7.6: after a field crash during Mode 1 (red-button tap logged a
+    point, unit fully rebooted) that didn't reproduce when reconnected over
+    USB for serial output -- itself a clue, since USB supplies steadier
+    power than the battery chain does -- added printResetReason(), printed
+    first thing in setup() via esp_reset_reason(). This distinguishes a
+    BROWNOUT (supply voltage sagged too low, e.g. a WiFi-scan current spike
+    on a marginal/aging battery) from a PANIC, a task/interrupt watchdog
+    timeout, or an ordinary power-on/software reset -- so the next crash,
+    if there is one, says which kind it was instead of just "it rebooted".
+    Bumped FIRMWARE_VERSION to "7.6".
 */
 
 #include <SPI.h>
@@ -253,6 +263,7 @@
 #include <RTClib.h>      // DS3231 real-time clock (Build 2) -- needs Wire.h above
 #include <WiFi.h>
 #include <WiFiProv.h>
+#include <esp_system.h>  // esp_reset_reason() -- logs WHY the board last restarted (see printResetReason())
 #include <WebServer.h>   // simple file-access web server for Mode 3 (built into the ESP32 core, no extra library needed)
 #include <Adafruit_GFX.h>
 #include <Adafruit_ILI9341.h>
@@ -264,7 +275,7 @@
 // Build 7: shown on the new Diagnostics screen (More menu) and worth
 // bumping by hand whenever a build is flashed, same spirit as the
 // Build 1/2/2.1/... notes in the big comment block above.
-#define FIRMWARE_VERSION "7.5"
+#define FIRMWARE_VERSION "7.6"
 
 // RSSI thresholds (dBm):
 //   >= -60 dBm : good / green
@@ -1548,6 +1559,37 @@ void showBootScreen() {
   delay(3000);
 }
 
+// Prints why the board restarted -- a brownout/power-glitch reset, an
+// unhandled panic/abort, a task-watchdog timeout (something hung too long
+// without yielding), or just a normal power-on/button/firmware-flash reset.
+// Added after a field crash during Mode 1 (red-button tap) that didn't
+// reproduce over a stable USB connection, to tell a genuine power-supply
+// brownout apart from a software fault next time, rather than guessing from
+// "it rebooted" alone. esp_reset_reason() is cheap and always available, so
+// this stays in permanently rather than only during active debugging.
+void printResetReason() {
+  esp_reset_reason_t reason = esp_reset_reason();
+  const char* label;
+  switch (reason) {
+    case ESP_RST_POWERON:   label = "power-on (fresh power-up)"; break;
+    case ESP_RST_EXT:       label = "external reset pin"; break;
+    case ESP_RST_SW:        label = "software reset (e.g. ESP.restart())"; break;
+    case ESP_RST_PANIC:     label = "PANIC -- unhandled exception/abort in firmware"; break;
+    case ESP_RST_INT_WDT:   label = "interrupt watchdog timeout -- an ISR or interrupt-disabled section ran too long"; break;
+    case ESP_RST_TASK_WDT:  label = "task watchdog timeout -- a task hung without yielding"; break;
+    case ESP_RST_WDT:       label = "other watchdog timeout"; break;
+    case ESP_RST_DEEPSLEEP: label = "woke from deep sleep"; break;
+    case ESP_RST_BROWNOUT:  label = "BROWNOUT -- supply voltage dropped too low (battery/current-spike related, not firmware)"; break;
+    case ESP_RST_SDIO:      label = "SDIO reset"; break;
+    default:                label = "unknown"; break;
+  }
+  Serial.print("Reset reason: ");
+  Serial.print((int)reason);
+  Serial.print(" (");
+  Serial.print(label);
+  Serial.println(")");
+}
+
 void setup() {
   // CPU clock down from the 240MHz default — pure power saving, no
   // diagnostic impact: WiFi scan/connect timing is driven by the radio
@@ -1558,6 +1600,7 @@ void setup() {
   Serial.begin(115200);
   delay(1000);
   Serial.print("=== WiFi survey (Stage 7, firmware "); Serial.print(FIRMWARE_VERSION); Serial.println(") ==="); // was a hardcoded "Stage 6" left over from before this file was renamed/rebuilt -- now prints the actual FIRMWARE_VERSION so the boot banner can't silently drift from reality again
+  printResetReason();
   Serial.print("Target SSID: ");
   Serial.println(TARGET_SSID);
 
