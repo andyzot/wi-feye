@@ -39,10 +39,12 @@ const char* TARGET_SSID = "YourNetworkNameHere";
 ```
 
 `secrets.h` is gitignored, so your own value never gets committed. This is
-only used by Modes 1 and 2, which scan for that specific network's signal
-while you walk around — Mode 3's continuous monitor instead connects via
-SoftAP provisioning, with the password entered once on your phone and
-stored only in the ESP32's own flash, never in source.
+only the *default* for Modes 1 and 2, which scan for a network's signal
+while you walk around — on-screen, you can tap a different nearby network
+to survey instead each time you enter Mode 1 or 2, without reflashing (see
+the on-screen target-network picker). Mode 3's continuous monitor instead
+connects via SoftAP provisioning, with the password entered once on your
+phone and stored only in the ESP32's own flash, never in source.
 
 ## Reading the logs
 
@@ -57,6 +59,7 @@ plain-text summary from there too.
 - **Monitor (Mode 3):** `sequence,storage,timestamp,event,rssi_dbm,recommendation`
 - **Walk (Mode 2):** `sequence,storage,event,zone,timestamp,rssi_dbm,avg_rssi_dbm,recommendation`
 - **Survey (Mode 1):** `sequence,storage,floorplan,x_percent,y_percent,img_x,img_y,timestamp,rssi_dbm`
+- **Boot log (`/boot_log.csv`, every boot, any mode):** `sequence,storage,timestamp,reset_reason_code,reset_reason_label`
 
 ## Status
 

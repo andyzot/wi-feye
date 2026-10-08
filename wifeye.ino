@@ -294,6 +294,24 @@
     out to the mode menu, same convention as the floor-plan and mode
     pickers. TARGET_SSID itself is unchanged and still used as the
     compiled-in default shown at boot. Bumped FIRMWARE_VERSION to "8.0".
+  - Build 8.1: a battery-powered field crash during Mode 2 testing proved
+    Build 7.6's printResetReason() wasn't actually enough on its own --
+    it only ever printed to Serial, which goes nowhere when the crash
+    happens untethered on battery with no Serial Monitor listening. Added
+    logBootEvent(), called once in setup() right after SD/FFat and the
+    RTC are both ready (so it has somewhere to write and a real
+    timestamp), writing the SAME reset-reason information to a new,
+    dedicated /boot_log.csv instead (sequence,storage,timestamp,
+    reset_reason_code,reset_reason_label) -- one row every boot, not just
+    crashes, so a pattern of repeated brownouts is visible over time, not
+    just a single incident. Deliberately its own file rather than living
+    inside any one mode's CSV, since a crash can happen during Mode 1 or
+    2 testing just as easily as Mode 3, and this is written before any
+    mode is even chosen. Uses the same live SD-preferred/internal-flash-
+    fallback choice as Mode 2/3's own loggers. resetReasonLabel() pulled
+    out of printResetReason() so both it and logBootEvent() share the
+    exact same wording rather than keeping two copies in sync by hand.
+    Bumped FIRMWARE_VERSION to "8.1".
 */
 
 #include <SPI.h>
@@ -327,7 +345,7 @@ struct Mode3EventEntry;
 // Build 7: shown on the new Diagnostics screen (More menu) and worth
 // bumping by hand whenever a build is flashed, same spirit as the
 // Build 1/2/2.1/... notes in the big comment block above.
-#define FIRMWARE_VERSION "8.0"
+#define FIRMWARE_VERSION "8.1"
 
 // RSSI thresholds (dBm):
 //   >= -60 dBm : good / green
@@ -1809,6 +1827,25 @@ void showBootScreen() {
   delay(3000);
 }
 
+// Build 8.1: pulled out of printResetReason() so logBootEvent() below can
+// reuse the exact same wording in the SD/FFat log, rather than keeping a
+// second copy of this switch in sync by hand.
+const char* resetReasonLabel(esp_reset_reason_t reason) {
+  switch (reason) {
+    case ESP_RST_POWERON:   return "power-on (fresh power-up)";
+    case ESP_RST_EXT:       return "external reset pin";
+    case ESP_RST_SW:        return "software reset (e.g. ESP.restart())";
+    case ESP_RST_PANIC:     return "PANIC -- unhandled exception/abort in firmware";
+    case ESP_RST_INT_WDT:   return "interrupt watchdog timeout -- an ISR or interrupt-disabled section ran too long";
+    case ESP_RST_TASK_WDT:  return "task watchdog timeout -- a task hung without yielding";
+    case ESP_RST_WDT:       return "other watchdog timeout";
+    case ESP_RST_DEEPSLEEP: return "woke from deep sleep";
+    case ESP_RST_BROWNOUT:  return "BROWNOUT -- supply voltage dropped too low (battery/current-spike related, not firmware)";
+    case ESP_RST_SDIO:      return "SDIO reset";
+    default:                return "unknown";
+  }
+}
+
 // Prints why the board restarted -- a brownout/power-glitch reset, an
 // unhandled panic/abort, a task-watchdog timeout (something hung too long
 // without yielding), or just a normal power-on/button/firmware-flash reset.
@@ -1817,27 +1854,102 @@ void showBootScreen() {
 // brownout apart from a software fault next time, rather than guessing from
 // "it rebooted" alone. esp_reset_reason() is cheap and always available, so
 // this stays in permanently rather than only during active debugging.
+//
+// Build 8.1: this alone turned out not to be enough -- a crash on battery,
+// away from a USB connection, has no Serial Monitor listening, so this
+// printed line is lost the instant it's written, in exactly the situation
+// it's meant to catch. See logBootEvent() below, called right after this
+// in setup(), which writes the same information to SD/internal flash
+// instead, so it's actually retrievable afterward with no serial connection
+// needed at all.
 void printResetReason() {
   esp_reset_reason_t reason = esp_reset_reason();
-  const char* label;
-  switch (reason) {
-    case ESP_RST_POWERON:   label = "power-on (fresh power-up)"; break;
-    case ESP_RST_EXT:       label = "external reset pin"; break;
-    case ESP_RST_SW:        label = "software reset (e.g. ESP.restart())"; break;
-    case ESP_RST_PANIC:     label = "PANIC -- unhandled exception/abort in firmware"; break;
-    case ESP_RST_INT_WDT:   label = "interrupt watchdog timeout -- an ISR or interrupt-disabled section ran too long"; break;
-    case ESP_RST_TASK_WDT:  label = "task watchdog timeout -- a task hung without yielding"; break;
-    case ESP_RST_WDT:       label = "other watchdog timeout"; break;
-    case ESP_RST_DEEPSLEEP: label = "woke from deep sleep"; break;
-    case ESP_RST_BROWNOUT:  label = "BROWNOUT -- supply voltage dropped too low (battery/current-spike related, not firmware)"; break;
-    case ESP_RST_SDIO:      label = "SDIO reset"; break;
-    default:                label = "unknown"; break;
-  }
+  const char* label = resetReasonLabel(reason);
   Serial.print("Reset reason: ");
   Serial.print((int)reason);
   Serial.print(" (");
   Serial.print(label);
   Serial.println(")");
+}
+
+// Build 8.1: writes one row to /boot_log.csv every single boot -- not just
+// crashes -- recording the same reset reason printResetReason() prints to
+// Serial, but persisted to SD/internal flash instead so it's actually
+// retrievable afterward with no serial connection needed (see that
+// function's comment for why Serial-only logging isn't enough on its own).
+// Deliberately its own file rather than living inside any one mode's CSV:
+// a crash can happen during Mode 1 or Mode 2 testing just as easily as
+// Mode 3, and this has to be written in setup() before any mode is even
+// chosen, so it can't depend on one mode's own log file naming/rotation.
+// Appends forever (no auto-incrementing filename like the per-session
+// mode logs) -- this is a device-wide boot history meant to grow over the
+// unit's whole life, not a single survey session's data.
+// Same live SD-preferred/internal-flash-fallback choice as Mode 2/3's
+// loggers (preferInternalLogging / trySDInit() re-check), so a row lands
+// somewhere even with no SD card fitted.
+const char* BOOT_LOG_FILE = "/boot_log.csv";
+const char* BOOT_LOG_FALLBACK_FILE = "/boot_log_fallback.csv";
+
+void appendBootLogLineToFallback(int reasonCode, const char* label) {
+  bool fileExists = FFat.exists(BOOT_LOG_FALLBACK_FILE);
+  File f = FFat.open(BOOT_LOG_FALLBACK_FILE, FILE_APPEND);
+  if (!f) {
+    Serial.println("Boot log: internal-flash fallback also failed to open -- this boot's row is lost");
+    return;
+  }
+  if (!fileExists) {
+    f.println("sequence,storage,timestamp,reset_reason_code,reset_reason_label");
+  }
+  globalLogSequence++;
+  f.print(globalLogSequence);
+  f.print(",FFAT,");
+  f.print(currentTimestamp());
+  f.print(",");
+  f.print(reasonCode);
+  f.print(",");
+  f.println(label);
+  f.close();
+  Serial.println("Boot log: SD write failed -- row saved to internal flash fallback instead (/boot_log_fallback.csv)");
+}
+
+void logBootEvent() {
+  esp_reset_reason_t reason = esp_reset_reason();
+  const char* label = resetReasonLabel(reason);
+
+  if (preferInternalLogging) {
+    appendBootLogLineToFallback((int)reason, label);
+    return;
+  }
+
+  if (!app.sdCardAvailable) {
+    app.sdCardAvailable = trySDInit();
+  }
+  if (!app.sdCardAvailable) {
+    appendBootLogLineToFallback((int)reason, label);
+    return;
+  }
+
+  bool fileExists = SD.exists(BOOT_LOG_FILE);
+  File f = SD.open(BOOT_LOG_FILE, FILE_APPEND);
+  if (!f) {
+    Serial.println("Boot log: could not open /boot_log.csv for append -- card may have been removed");
+    app.sdCardAvailable = false;
+    appendBootLogLineToFallback((int)reason, label);
+    return;
+  }
+  if (!fileExists) {
+    f.println("sequence,storage,timestamp,reset_reason_code,reset_reason_label");
+  }
+  globalLogSequence++;
+  f.print(globalLogSequence);
+  f.print(",SD,");
+  f.print(currentTimestamp());
+  f.print(",");
+  f.print((int)reason);
+  f.print(",");
+  f.println(label);
+  f.close();
+  Serial.println("Boot log: row written to /boot_log.csv");
 }
 
 void setup() {
@@ -1993,6 +2105,13 @@ void setup() {
   Serial.print(WALK_CSV_FILE);
   Serial.print(", ");
   Serial.println(MONITOR_LOG_FILE);
+
+  // Build 8.1: written here, after storage and the RTC are both ready but
+  // before any mode is chosen, so it's captured on EVERY boot regardless
+  // of which mode was running when a crash happened or which mode runs
+  // next -- see logBootEvent()'s own comment for why this exists
+  // alongside printResetReason().
+  logBootEvent();
 
   enterMode(selectMode());
 }
