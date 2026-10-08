@@ -312,6 +312,18 @@
     out of printResetReason() so both it and logBootEvent() share the
     exact same wording rather than keeping two copies in sync by hand.
     Bumped FIRMWARE_VERSION to "8.1".
+  - Build 8.2: removed secrets.h/TARGET_SSID entirely. Mode 3 never used
+    it (SoftAP Prov instead), and once Build 8 added the on-screen
+    network picker, Modes 1/2 stopped needing a compiled-in default too --
+    enterMode() always sets activeTargetSsid from a real on-screen choice
+    before either mode runs, so the old default had quietly become dead
+    weight (noticed when asked why a secrets file was still needed at
+    all, given neither mode can actually reach it anymore). Dropped the
+    #include, changed activeTargetSsid's initial value to "", removed the
+    boot banner's "Default target SSID" line, deleted secrets.h.example,
+    and removed the secrets.h entry from .gitignore. No per-build
+    configuration is needed anymore -- the sketch just compiles and
+    flashes as-is. Bumped FIRMWARE_VERSION to "8.2".
 */
 
 #include <SPI.h>
@@ -328,7 +340,12 @@
 #include <XPT2046_Touchscreen.h>
 #include <TJpg_Decoder.h>
 #include "wifeye_logo_data.h"   // Wi-FEye boot logo, baked into flash (see showBootScreen)
-#include "secrets.h"            // defines TARGET_SSID for your own network -- see secrets.h.example; secrets.h itself is gitignored so it never gets committed
+// Build 8.2: secrets.h/TARGET_SSID removed -- Mode 3 never used it (SoftAP
+// Prov instead), and Build 8's on-screen network picker means Modes 1/2
+// no longer need a compiled-in default either (enterMode() always picks a
+// real target before entering either mode, so the old default was already
+// dead weight). Nothing here needs to be set per-build/per-person anymore,
+// so there's no more "secrets" file at all.
 
 // Forward declaration, needed only because of how Arduino compiles a .ino:
 // it auto-generates a prototype for every function in the sketch and
@@ -345,7 +362,7 @@ struct Mode3EventEntry;
 // Build 7: shown on the new Diagnostics screen (More menu) and worth
 // bumping by hand whenever a build is flashed, same spirit as the
 // Build 1/2/2.1/... notes in the big comment block above.
-#define FIRMWARE_VERSION "8.1"
+#define FIRMWARE_VERSION "8.2"
 
 // RSSI thresholds (dBm):
 //   >= -60 dBm : good / green
@@ -589,17 +606,19 @@ const int LIST_TOP = 30;
 int ROW_H = 30;   // recomputed to fill the screen once floorplanCount is known — see scanFloorPlans()
 
 // --- Build 8: on-screen target-network picker for Modes 1/2 ---
-// TARGET_SSID (from secrets.h) used to be the ONLY network Modes 1/2 could
-// ever survey — fine for a single site, but it meant a recompile+reflash
-// every time this device moved to a different location with a different
-// network name (e.g. home's "Poohcorner2" vs a site's "Guest123"). Since
-// Modes 1/2 never actually associate with the network (they only scan for
-// its beacon and read its RSSI), there's no real need to hardcode it:
+// A hardcoded TARGET_SSID used to be the ONLY network Modes 1/2 could ever
+// survey — fine for a single site, but it meant a recompile+reflash every
+// time this device moved to a different location with a different network
+// name (e.g. home's "Poohcorner2" vs a site's "Guest123"). Since Modes 1/2
+// never actually associate with the network (they only scan for its beacon
+// and read its RSSI), there's no real need to hardcode it at all:
 // activeTargetSsid is chosen at runtime instead, from a tap-to-pick list
 // built from a live scan — see scanNetworksForPicker()/selectTargetNetwork()
-// below, wired up in enterMode(). TARGET_SSID itself is untouched and still
-// used as the printed-at-boot default; it's just no longer the only option.
-String activeTargetSsid = String(TARGET_SSID);
+// below, wired up in enterMode(), which always sets this to a real choice
+// before Mode 1/2 ever runs. Starts empty -- Build 8.2 removed the old
+// compiled-in default (secrets.h/TARGET_SSID) once it became clear nothing
+// ever actually used it anymore.
+String activeTargetSsid = "";
 #define MAX_SURVEY_NETWORKS 8   // how many fit on screen at once, same idea as MAX_FLOORPLANS
 char surveyNetworkNames[MAX_SURVEY_NETWORKS][33];   // SSIDs are at most 32 chars + null terminator
 int surveyNetworkRssi[MAX_SURVEY_NETWORKS];
@@ -1328,10 +1347,9 @@ void drawCrosshair() {
   tft.drawFastVLine(cx, cy + gap, armLen - gap, color);
 }
 
-// Pulls the strongest RSSI for activeTargetSsid (Build 8: the on-screen-
-// picked network, defaulting to TARGET_SSID until changed) out of an
-// already-completed scan's results (n entries), or RSSI_NOT_FOUND if it
-// wasn't in range.
+// Pulls the strongest RSSI for activeTargetSsid (Build 8: the network
+// picked on-screen when this mode was entered) out of an already-completed
+// scan's results (n entries), or RSSI_NOT_FOUND if it wasn't in range.
 int bestRssiFromScan(int n) {
   int bestRssi = RSSI_NOT_FOUND;
   for (int i = 0; i < n; i++) {
@@ -1963,11 +1981,10 @@ void setup() {
   delay(1000);
   Serial.print("=== Wi-FEye, firmware "); Serial.print(FIRMWARE_VERSION); Serial.println(" ==="); // Build 8: dropped the hardcoded "Stage 7" label (a leftover from before FIRMWARE_VERSION existed, and stale again after Build 8's version bump) -- FIRMWARE_VERSION alone is the one label that's actually kept up to date, so the banner no longer carries a second, separately-tracked name alongside it
   printResetReason();
-  // Build 8: this is only the compiled-in DEFAULT now -- Modes 1/2 let you
-  // pick a different network to survey on-screen each time you enter
-  // them, via activeTargetSsid (see selectTargetNetwork()/enterMode()).
-  Serial.print("Default target SSID (Modes 1/2, until changed on-screen): ");
-  Serial.println(TARGET_SSID);
+  // Build 8.2: no more compiled-in default to print here -- Modes 1/2 pick
+  // a network to survey on-screen each time you enter them (see
+  // selectTargetNetwork()/enterMode()), and that's now the ONLY way they
+  // get one.
 
   pinMode(BTN_YELLOW, INPUT_PULLUP);
   pinMode(BTN_BLUE,   INPUT_PULLUP);

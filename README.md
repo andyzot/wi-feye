@@ -31,20 +31,13 @@ Needs the Arduino IDE (or arduino-cli) with the ESP32 board package, plus:
 `WiFiProv`, `WebServer`, `Adafruit_GFX`, `Adafruit_ILI9341`,
 `XPT2046_Touchscreen`, `TJpg_Decoder` — all available via Library Manager.
 
-Before building, copy `secrets.h.example` to `secrets.h` (same folder as
-the `.ino`) and set `TARGET_SSID` to your own network's name:
-
-```cpp
-const char* TARGET_SSID = "YourNetworkNameHere";
-```
-
-`secrets.h` is gitignored, so your own value never gets committed. This is
-only the *default* for Modes 1 and 2, which scan for a network's signal
-while you walk around — on-screen, you can tap a different nearby network
-to survey instead each time you enter Mode 1 or 2, without reflashing (see
-the on-screen target-network picker). Mode 3's continuous monitor instead
-connects via SoftAP provisioning, with the password entered once on your
-phone and stored only in the ESP32's own flash, never in source.
+No per-build configuration needed — just open `wifeye.ino` and flash it.
+Modes 1 and 2 (which scan for a network's signal while you walk around)
+let you tap which nearby network to survey each time you enter them, from
+an on-screen list built from a live scan — no network name is ever
+hardcoded. Mode 3's continuous monitor connects via SoftAP provisioning
+instead, with the password entered once on your phone (the "ESP SoftAP
+Prov" app) and stored only in the ESP32's own flash, never in source.
 
 ## Reading the logs
 
