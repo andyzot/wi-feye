@@ -347,6 +347,19 @@
     -60 to -65 dBm, to better match conventional good/fair WiFi signal
     bands -- affects the on-screen recommendation text and traffic-light
     colour in all three modes. Renamed the sketch file to WiFEyeV8a.ino.
+  - Build 8b: added a gateway ping/packet-loss test to Mode 3 (the only
+    mode that actually associates to a network) via the ESP32Ping
+    library. Rides along on the existing 30s periodic-sample tick rather
+    than its own timer -- pings WiFi.gatewayIP() once per tick and logs
+    the round-trip time (or "TIMEOUT") in a new gateway_ping_ms column on
+    /monitor_log.csv and its flash fallback. Note: Ping.ping() is a
+    blocking call, unlike almost everything else in this sketch -- fast
+    on success, but can hold mode3Loop() for close to its ~1s internal
+    timeout on a failed ping. Accepted as a reasonable trade-off since
+    Mode 3 is a leave-in-place mode, not actively tapped through. Also
+    fixed Mode 1's zoom-control "+" button, whose glyph sat visibly left
+    of center compared to "R" and "-" -- nudged its cursor offset from
+    TOOLBAR_X+12 to TOOLBAR_X+20. Renamed the sketch file to WiFEyeV8b.ino.
 */
 
 #include <SPI.h>
@@ -358,6 +371,7 @@
 #include <WiFiProv.h>
 #include <esp_system.h>  // esp_reset_reason() -- logs WHY the board last restarted (see printResetReason())
 #include <WebServer.h>   // simple file-access web server for Mode 3 (built into the ESP32 core, no extra library needed)
+#include <ESP32Ping.h>   // Build 8b: gateway ping/packet-loss test, Mode 3 only -- Library Manager, "ESP32Ping" by marian-craciunescu
 #include <Adafruit_GFX.h>
 #include <Adafruit_ILI9341.h>
 #include <XPT2046_Touchscreen.h>
@@ -385,7 +399,7 @@ struct Mode3EventEntry;
 // Build 7: shown on the new Diagnostics screen (More menu) and worth
 // bumping by hand whenever a build is flashed, same spirit as the
 // Build 1/2/2.1/... notes in the big comment block above.
-#define FIRMWARE_VERSION "8a"
+#define FIRMWARE_VERSION "8b"
 
 // RSSI thresholds (dBm):
 //   >= -60 dBm : good / green
@@ -1350,7 +1364,7 @@ void drawZoomControls() {
   // + — bottom third
   tft.fillRect(TOOLBAR_X, 2 * BAND_H, TOOLBAR_W, BAND_H - 3, ILI9341_NAVY);
   tft.drawRect(TOOLBAR_X, 2 * BAND_H, TOOLBAR_W, BAND_H - 3, ILI9341_WHITE);
-  tft.setCursor(TOOLBAR_X + 12, 2 * BAND_H + BAND_H / 2 - 12);
+  tft.setCursor(TOOLBAR_X + 20, 2 * BAND_H + BAND_H / 2 - 12);
   tft.print("+");
 
   tft.setTextSize(1);   // restore default used elsewhere
@@ -3413,7 +3427,7 @@ void SysProvEvent(arduino_event_t *sys_event) {
 // only exists to catch a line that would otherwise be silently lost if
 // the card drops out mid-session (contact bounce, card worked loose,
 // write error) after a perfectly good init at boot.
-void appendMonitorLogLineToFallback(const char *event, int rssi, const String &recommendation) {
+void appendMonitorLogLineToFallback(const char *event, int rssi, const String &recommendation, const String &pingMs) {
   bool fileExists = FFat.exists(MONITOR_LOG_FALLBACK_FILE);
   File f = FFat.open(MONITOR_LOG_FALLBACK_FILE, FILE_APPEND);
   if (!f) {
@@ -3421,7 +3435,7 @@ void appendMonitorLogLineToFallback(const char *event, int rssi, const String &r
     return;
   }
   if (!fileExists) {
-    f.println("sequence,storage,timestamp,event,rssi_dbm,recommendation");
+    f.println("sequence,storage,timestamp,event,rssi_dbm,recommendation,gateway_ping_ms");
   }
   globalLogSequence++;
   f.print(globalLogSequence);
@@ -3436,16 +3450,18 @@ void appendMonitorLogLineToFallback(const char *event, int rssi, const String &r
     f.print(rssi);
   }
   f.print(",");
-  f.println(recommendation);
+  f.print(recommendation);
+  f.print(",");
+  f.println(pingMs);
   f.close();
   Serial.println("Mode 3: SD write failed — line saved to internal flash fallback instead (/monitor_log_fallback.csv)");
 }
 
-void appendMonitorLogLine(const char *event, int rssi, const String &recommendation) {
+void appendMonitorLogLine(const char *event, int rssi, const String &recommendation, const String &pingMs) {
   // Internal flash preferred (chosen at boot) -- same as Mode 2's
   // appendWalkCsvLine, always use it directly, no need to ever try SD.
   if (preferInternalLogging) {
-    appendMonitorLogLineToFallback(event, rssi, recommendation);
+    appendMonitorLogLineToFallback(event, rssi, recommendation, pingMs);
     return;
   }
 
@@ -3456,7 +3472,7 @@ void appendMonitorLogLine(const char *event, int rssi, const String &recommendat
     app.sdCardAvailable = trySDInit();
   }
   if (!app.sdCardAvailable) {
-    appendMonitorLogLineToFallback(event, rssi, recommendation);
+    appendMonitorLogLineToFallback(event, rssi, recommendation, pingMs);
     return;
   }
 
@@ -3465,11 +3481,11 @@ void appendMonitorLogLine(const char *event, int rssi, const String &recommendat
   if (!f) {
     Serial.println("Could not open monitor log CSV for append -- card may have been removed");
     app.sdCardAvailable = false;
-    appendMonitorLogLineToFallback(event, rssi, recommendation);
+    appendMonitorLogLineToFallback(event, rssi, recommendation, pingMs);
     return;
   }
   if (!fileExists) {
-    f.println("sequence,storage,timestamp,event,rssi_dbm,recommendation");
+    f.println("sequence,storage,timestamp,event,rssi_dbm,recommendation,gateway_ping_ms");
   }
   globalLogSequence++;
   f.print(globalLogSequence);
@@ -3484,7 +3500,9 @@ void appendMonitorLogLine(const char *event, int rssi, const String &recommendat
     f.print(rssi);
   }
   f.print(",");
-  f.println(recommendation);
+  f.print(recommendation);
+  f.print(",");
+  f.println(pingMs);
   f.close();
 }
 
@@ -3983,7 +4001,7 @@ void syncRtcFromNtp() {
     rtc.adjust(DateTime((uint32_t)epoch));
     Serial.println("Mode 3: RTC synced from NTP (UTC)");
     String newTimestamp = currentTimestamp();
-    appendMonitorLogLine("TIME_SYNC", RSSI_NOT_FOUND, "RTC corrected from NTP: " + oldTimestamp + " -> " + newTimestamp);
+    appendMonitorLogLine("TIME_SYNC", RSSI_NOT_FOUND, "RTC corrected from NTP: " + oldTimestamp + " -> " + newTimestamp, "");
   } else {
     Serial.println("Mode 3: NTP sync failed (no response within timeout) -- RTC left as-is");
   }
@@ -4138,12 +4156,12 @@ void checkMode3CongestionScan() {
     // every SAMPLE row, so detailed per-neighbor data doesn't bloat the
     // common case.
     if (mode3NearbyApSummary.length() > 0) {
-      appendMonitorLogLine("NEARBY_APS", RSSI_NOT_FOUND, mode3NearbyApSummary);
+      appendMonitorLogLine("NEARBY_APS", RSSI_NOT_FOUND, mode3NearbyApSummary, "");
     }
     // Build 7.1: the full per-channel tally -- see buildChannelSurvey()'s
     // own comment for what this can and can't tell you.
     String channelSurvey = buildChannelSurvey(n, channel, &mode3RecommendedChannel, myBssid);
-    appendMonitorLogLine("CHANNEL_SURVEY", RSSI_NOT_FOUND, channelSurvey);
+    appendMonitorLogLine("CHANNEL_SURVEY", RSSI_NOT_FOUND, channelSurvey, "");
   }
   WiFi.scanDelete();
   mode3ScanPending = false;
@@ -4175,7 +4193,7 @@ void checkMode3HeapHealth() {
                   "Not necessarily a fault on its own, but worth noting if it keeps falling on successive checks.";
     Serial.print("Mode 3: WARNING -- ");
     Serial.println(note);
-    appendMonitorLogLine("LOW_HEAP", RSSI_NOT_FOUND, note);
+    appendMonitorLogLine("LOW_HEAP", RSSI_NOT_FOUND, note, "");
   }
 }
 
@@ -4290,7 +4308,7 @@ void mode3Loop() {
       if (entry.duringChannelSurvey) {
         note += " (coincided with a channel-survey scan -- may be the scan itself briefly leaving the channel, not a genuine AP-side drop)";
       }
-      appendMonitorLogLine("DISCONNECTED", RSSI_NOT_FOUND, note);
+      appendMonitorLogLine("DISCONNECTED", RSSI_NOT_FOUND, note, "");
       if (mode3AlertPiezoEnabled) {
         mode3AlertActive = true;   // silenced by any button press, or by reconnecting (below)
       }
@@ -4311,7 +4329,7 @@ void mode3Loop() {
       if (entry.duringChannelSurvey) {
         note += " (channel-survey scan was in flight when this reconnected)";
       }
-      appendMonitorLogLine(evt, WiFi.RSSI(), note);
+      appendMonitorLogLine(evt, WiFi.RSSI(), note, "");
     }
     mode3LastStateChangeMs = entry.atMs;
     refreshMode3Screen();
@@ -4326,7 +4344,7 @@ void mode3Loop() {
     app.mode3State = MODE3_OFFLINE;
     Serial.println("Mode 3: no reconnect within the grace period -- sustained loss");
     appendMonitorLogLine("CONNECTION_LOST", RSSI_NOT_FOUND,
-                          "No reconnect within " + String(MODE3_RECONNECT_GRACE_MS / 1000) + "s of the disconnect -- treating as a sustained loss, not a brief drop.");
+                          "No reconnect within " + String(MODE3_RECONNECT_GRACE_MS / 1000) + "s of the disconnect -- treating as a sustained loss, not a brief drop.", "");
     refreshMode3Screen();
   }
 
@@ -4346,10 +4364,26 @@ void mode3Loop() {
     mode3RssiSum += rssi;
     mode3RssiSampleCount++;
     String recommendation = buildRecommendation(false, rssi, mode3NearbyApCount, mode3CongestionChannel, mode3RecommendedChannel);
-    appendMonitorLogLine("SAMPLE", rssi, recommendation);
+
+    // Build 8b: gateway ping, riding along on this same 30s tick rather
+    // than its own timer. Ping.ping() is a BLOCKING call (unlike almost
+    // everything else in this sketch) -- fast when it succeeds, but it
+    // can hold mode3Loop() for close to its internal timeout (~1s) when
+    // the gateway doesn't answer. Acceptable here since Mode 3 is a
+    // leave-in-place mode, not something actively tapped through.
+    String pingMs;
+    IPAddress gateway = WiFi.gatewayIP();
+    if (Ping.ping(gateway, 1)) {
+      pingMs = String((int)Ping.averageTime());
+    } else {
+      pingMs = "TIMEOUT";
+    }
+
+    appendMonitorLogLine("SAMPLE", rssi, recommendation, pingMs);
     Serial.print("Mode 3: sample RSSI ");
     Serial.print(rssi);
-    Serial.println(" dBm");
+    Serial.print(" dBm, gateway ping ");
+    Serial.println(pingMs);
     mode3LastSampleMs = millis();
   }
 
