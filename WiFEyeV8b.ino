@@ -348,8 +348,10 @@
     bands -- affects the on-screen recommendation text and traffic-light
     colour in all three modes. Renamed the sketch file to WiFEyeV8a.ino.
   - Build 8b: added a gateway ping/packet-loss test to Mode 3 (the only
-    mode that actually associates to a network) via the ESP32Ping
-    library. Rides along on the existing 30s periodic-sample tick rather
+    mode that actually associates to a network) via the ESPping library
+    (Library Manager name -- its header is ESPping.h; "ESP32Ping" isn't
+    reliably indexed there despite being the more commonly-referenced
+    name online). Rides along on the existing 30s periodic-sample tick rather
     than its own timer -- pings WiFi.gatewayIP() once per tick and logs
     the round-trip time (or "TIMEOUT") in a new gateway_ping_ms column on
     /monitor_log.csv and its flash fallback. Note: Ping.ping() is a
@@ -371,7 +373,7 @@
 #include <WiFiProv.h>
 #include <esp_system.h>  // esp_reset_reason() -- logs WHY the board last restarted (see printResetReason())
 #include <WebServer.h>   // simple file-access web server for Mode 3 (built into the ESP32 core, no extra library needed)
-#include <ESP32Ping.h>   // Build 8b: gateway ping/packet-loss test, Mode 3 only -- Library Manager, "ESP32Ping" by marian-craciunescu
+#include <ESPping.h>     // Build 8b: gateway ping/packet-loss test, Mode 3 only -- Library Manager, search "ESPping" (not "ESP32Ping" -- that name isn't reliably indexed there)
 #include <Adafruit_GFX.h>
 #include <Adafruit_ILI9341.h>
 #include <XPT2046_Touchscreen.h>

@@ -29,7 +29,7 @@ A "More" menu adds Diagnostics (heap/uptime) and the File Browser.
 
 Needs the Arduino IDE (or arduino-cli) with the ESP32 board package, plus:
 `WiFiProv`, `WebServer`, `Adafruit_GFX`, `Adafruit_ILI9341`,
-`XPT2046_Touchscreen`, `TJpg_Decoder`, `ESP32Ping` — all available via
+`XPT2046_Touchscreen`, `TJpg_Decoder`, `ESPping` — all available via
 Library Manager.
 
 No per-build configuration needed — just open the `.ino` file and flash it.
