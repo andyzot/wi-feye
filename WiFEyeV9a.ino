@@ -387,6 +387,21 @@
     via Green) a proper label in wifiDisconnectReasonToString(), instead
     of falling through to the generic "code 8". Renamed the sketch file
     to WiFEyeV8c.ino.
+  - Build 9a: Mode 2's piezo now defaults to OFF instead of ON
+    (app.piezoMuted) -- Yellow still toggles it either way, matching the
+    same default-off treatment Mode 3's alert piezo got in Build 8c. Also
+    reworked buildChannelSurvey()'s channel recommendation to weight for
+    2.4GHz adjacent-channel overlap rather than an exact-channel-only
+    count: candidate channel 1 is now scored by summing the raw AP counts
+    across channels 1-4, channel 6 across 4-8, and channel 11 across
+    8-13, since a 20MHz-wide channel's real airtime is affected by
+    neighbors even when nothing sits exactly on it. The existing
+    current-channel-first tie-break is unchanged in spirit, just compares
+    the new weighted scores instead of raw counts. The per-channel
+    chN=count values logged in CHANNEL_SURVEY rows are untouched (still
+    raw/unweighted, so the Report tool's channel bar chart is unaffected)
+    -- only which channel gets recommended changes. Renamed the sketch
+    file to WiFEyeV9a.ino.
 */
 
 #include <SPI.h>
@@ -426,7 +441,7 @@ struct Mode3EventEntry;
 // Build 7: shown on the new Diagnostics screen (More menu) and worth
 // bumping by hand whenever a build is flashed, same spirit as the
 // Build 1/2/2.1/... notes in the big comment block above.
-#define FIRMWARE_VERSION "8c"
+#define FIRMWARE_VERSION "9a"
 
 // RSSI thresholds (dBm):
 //   >= -60 dBm : good / green
@@ -530,7 +545,7 @@ struct AppState {
 
   // Mode 2 (walk survey)
   int currentZone = 1;
-  bool piezoMuted = false;
+  bool piezoMuted = true;   // Build 9a: off by default -- Yellow still toggles it
 
   // Mode 3 (leave-in-place monitor)
   Mode3ConnectionState mode3State = MODE3_OFFLINE;
@@ -2873,7 +2888,7 @@ void enterMode(int mode) {
 
 void startMode2() {
   app.currentZone = 1;
-  app.piezoMuted = false;
+  app.piezoMuted = true;   // Build 9a: off by default -- Yellow still toggles it
   rssiHistoryCount = 0;
   ambientScanPending = false;
   lastDisplayedBand = -1;
@@ -4145,19 +4160,34 @@ String buildChannelSurvey(int n, int currentChannel, int *outRecommended, const 
     if (WiFi.RSSI(i) > -80) counts[ch]++;
   }
 
-  // Build 7.5: tie-break fix. This used to always start from channel 1 and
-  // only move off it on a strict "<" comparison -- which sounds fine, but
-  // because the starting point was always 1 rather than whatever's
-  // actually in use, a 3-way tie (e.g. all of 1/6/11 equally quiet) always
-  // "recommended" switching to 1 even if you were already sitting on an
-  // equally-quiet 6 or 11 -- advice with no real benefit behind it. Now it
-  // starts from the current channel (if it's one of the three candidates;
-  // falls back to 1 if not) and only moves away when another candidate is
-  // STRICTLY quieter, so a tie keeps the recommendation as "stay put".
+  // Build 9a: adjacent-channel-overlap weighting. A raw per-channel count
+  // (the old comparison) only credits an AP sitting exactly on 1, 6 or 11 --
+  // but 2.4GHz 20MHz-wide channels bleed into their neighbors, so an AP on
+  // channel 3 or 4 still eats into channel 1's real airtime even though it
+  // never shows up in counts[1]. Score each of the three non-overlapping
+  // candidates by summing the raw counts across the channels it actually
+  // overlaps: 1 -> 1-4, 6 -> 4-8, 11 -> 8-13 (each candidate is 20MHz wide,
+  // +/-2 channels either side at 5MHz/channel spacing). Still just a count
+  // of other visible networks, same honesty caveat as before -- this is a
+  // better same-radio-category estimate, not a traffic/airtime measurement.
+  int weighted1 = counts[1] + counts[2] + counts[3] + counts[4];
+  int weighted6 = counts[4] + counts[5] + counts[6] + counts[7] + counts[8];
+  int weighted11 = counts[8] + counts[9] + counts[10] + counts[11] + counts[12] + counts[13];
+
+  // Build 7.5: tie-break fix, unchanged in spirit -- start from the current
+  // channel (if it's one of the three candidates; falls back to 1 if not)
+  // and only move away when another candidate's WEIGHTED score is STRICTLY
+  // lower, so a tie keeps the recommendation as "stay put" rather than
+  // bouncing to channel 1 by default.
   int best = (currentChannel == 1 || currentChannel == 6 || currentChannel == 11) ? currentChannel : 1;
   const int nonOverlapping[3] = {1, 6, 11};
+  const int weighted[3] = {weighted1, weighted6, weighted11};
+  int bestWeighted = (best == 1) ? weighted1 : (best == 6) ? weighted6 : weighted11;
   for (int k = 0; k < 3; k++) {
-    if (counts[nonOverlapping[k]] < counts[best]) best = nonOverlapping[k];
+    if (weighted[k] < bestWeighted) {
+      best = nonOverlapping[k];
+      bestWeighted = weighted[k];
+    }
   }
   if (outRecommended) *outRecommended = best;
 
@@ -4169,9 +4199,10 @@ String buildChannelSurvey(int n, int currentChannel, int *outRecommended, const 
   out += " current=" + String(currentChannel);
   out += " recommended=" + String(best);
   if (best == currentChannel) {
-    out += " (already quietest of 1/6/11)";
+    out += " (already quietest of 1/6/11 by adjacent-channel-weighted score)";
   }
-  out += " -- visible-AP counts only (>-80dBm), 2.4GHz only, not traffic volume or non-WiFi interference";
+  out += " -- visible-AP counts only (>-80dBm), 2.4GHz only, not traffic volume or non-WiFi interference;"
+         " recommendation weighted for adjacent-channel overlap (ch1~1-4, ch6~4-8, ch11~8-13), per-channel counts above are raw/unweighted";
   return out;
 }
 
