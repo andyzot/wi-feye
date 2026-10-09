@@ -362,6 +362,24 @@
     fixed Mode 1's zoom-control "+" button, whose glyph sat visibly left
     of center compared to "R" and "-" -- nudged its cursor offset from
     TOOLBAR_X+12 to TOOLBAR_X+20. Renamed the sketch file to WiFEyeV8b.ino.
+  - Build 8b fix: real-hardware test (Mode 3, then Mode 2, then Mode 1,
+    then back to Mode 3 -- all in one boot) surfaced "E network_prov_mgr:
+    Provisioning manager not initialized" on the second Mode 3 entry,
+    and Mode 3 never actually reconnected. Cause: startMode3() called
+    WiFiProv.beginProvision() again on every re-entry (mode3Started is
+    deliberately reset to false on a Green-button exit, so each new
+    Mode 3 session gets fresh running-summary counters) -- but
+    network_prov_mgr deinitializes itself once a provisioning session
+    completes, and isn't designed to be restarted mid-boot, so the
+    second beginProvision() call fails outright. Fixed with a second,
+    never-reset flag (mode3ProvisioningStartedThisBoot): beginProvision()
+    is now called only on the very first Mode 3 entry each boot; every
+    later entry just calls WiFi.begin() with no args, which reconnects
+    using the credentials already loaded in the driver from that first
+    connection. The existing SysProvEvent() handler is hooked to the
+    generic STA GOT_IP/DISCONNECTED events, not anything
+    provisioning-specific, so app.mode3State is still driven correctly
+    either way.
 */
 
 #include <SPI.h>
@@ -751,6 +769,7 @@ bool mode3AlertPiezoEnabled = true;
 bool mode3AlertActive = false;
 
 bool mode3Started = false;      // true once provisioning/connect has been kicked off this boot
+bool mode3ProvisioningStartedThisBoot = false;   // true once WiFiProv.beginProvision() has been called at all this boot -- unlike mode3Started, this is NEVER reset on a Green-button exit (see startMode3())
 // mode3Connected (bool) replaced in Build 7 by app.mode3State (Mode3ConnectionState) -- see AppState
 const unsigned long MODE3_RECONNECT_GRACE_MS = 20000;   // Build 7: how long MODE3_RECONNECTING is given before a disconnect that hasn't resolved counts as a genuine sustained loss (see mode3Loop()). Chosen as a middle ground between a brief AP reboot/channel-switch blip (often resolves in a few seconds) and a real outage -- long enough not to cry wolf on the former, short enough not to sit "reconnecting" for minutes on the latter.
 unsigned long mode3ReconnectingSinceMs = 0;             // millis() when MODE3_RECONNECTING began; checked against the grace period above
@@ -3853,10 +3872,28 @@ void startMode3() {
     // SoftAP when not -- WiFi.begin() here was redundant as well as the
     // direct cause of the conflict, so it's gone rather than reordered.
     WiFi.setAutoReconnect(true);
-    WiFiProv.beginProvision(
-      NETWORK_PROV_SCHEME_SOFTAP, NETWORK_PROV_SCHEME_HANDLER_NONE,
-      NETWORK_PROV_SECURITY_1, MODE3_POP, MODE3_SERVICE_NAME, NULL, NULL, false
-    );
+    if (!mode3ProvisioningStartedThisBoot) {
+      mode3ProvisioningStartedThisBoot = true;
+      WiFiProv.beginProvision(
+        NETWORK_PROV_SCHEME_SOFTAP, NETWORK_PROV_SCHEME_HANDLER_NONE,
+        NETWORK_PROV_SECURITY_1, MODE3_POP, MODE3_SERVICE_NAME, NULL, NULL, false
+      );
+    } else {
+      // Build 8b fix: re-entering Mode 3 later in the same boot (Green
+      // back to the menu, then Mode 3 again) used to call
+      // beginProvision() a second time -- confirmed on real hardware to
+      // fail with "E network_prov_mgr: Provisioning manager not
+      // initialized", because the underlying network_prov_mgr component
+      // deinitializes itself once a provisioning session completes and
+      // isn't designed to be restarted mid-boot. The stored credentials
+      // from the first successful connection are still loaded in the
+      // driver's running config, so a plain reconnect is all that's
+      // needed here -- WiFi.begin() with no args reuses them. The
+      // existing SysProvEvent() handler is hooked to the generic STA
+      // GOT_IP/DISCONNECTED events, not anything provisioning-specific,
+      // so it still drives app.mode3State exactly as before either way.
+      WiFi.begin();
+    }
   }
 
   mode3LastSampleMs = millis();
