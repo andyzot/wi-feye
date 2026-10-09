@@ -380,6 +380,13 @@
     generic STA GOT_IP/DISCONNECTED events, not anything
     provisioning-specific, so app.mode3State is still driven correctly
     either way.
+  - Build 8c: Mode 3's disconnect-alert piezo now defaults to OFF
+    instead of ON (mode3AlertPiezoEnabled) -- Red still toggles it
+    either way. Also gave WIFI_REASON_ASSOC_LEAVE (disconnect code 8 --
+    this device itself requesting the disconnect, e.g. leaving Mode 3
+    via Green) a proper label in wifiDisconnectReasonToString(), instead
+    of falling through to the generic "code 8". Renamed the sketch file
+    to WiFEyeV8c.ino.
 */
 
 #include <SPI.h>
@@ -419,7 +426,7 @@ struct Mode3EventEntry;
 // Build 7: shown on the new Diagnostics screen (More menu) and worth
 // bumping by hand whenever a build is flashed, same spirit as the
 // Build 1/2/2.1/... notes in the big comment block above.
-#define FIRMWARE_VERSION "8b"
+#define FIRMWARE_VERSION "8c"
 
 // RSSI thresholds (dBm):
 //   >= -60 dBm : good / green
@@ -765,7 +772,7 @@ WebServer fileServer(80);
 // Mode 3. mode3AlertActive is true from the moment a genuine disconnect is
 // logged until either a button is pressed (anywhere in Mode 3) or the
 // device reconnects on its own -- see mode3Loop()/updateMode3Alert().
-bool mode3AlertPiezoEnabled = true;
+bool mode3AlertPiezoEnabled = false;   // Build 8c: was true (on by default) -- Red still toggles it either way
 bool mode3AlertActive = false;
 
 bool mode3Started = false;      // true once provisioning/connect has been kicked off this boot
@@ -3338,6 +3345,7 @@ const char* wifiDisconnectReasonToString(uint8_t reason) {
     case WIFI_REASON_ASSOC_TOOMANY:    return "ASSOC_TOOMANY (AP full/rejected)";
     case WIFI_REASON_NOT_AUTHED:       return "NOT_AUTHED";
     case WIFI_REASON_NOT_ASSOCED:      return "NOT_ASSOCED";
+    case WIFI_REASON_ASSOC_LEAVE:      return "ASSOC_LEAVE (this device requested the disconnect, e.g. leaving Mode 3)";
     case WIFI_REASON_BEACON_TIMEOUT:   return "BEACON_TIMEOUT (lost AP's beacon -- range/interference)";
     case WIFI_REASON_NO_AP_FOUND:      return "NO_AP_FOUND";
     case WIFI_REASON_HANDSHAKE_TIMEOUT: return "HANDSHAKE_TIMEOUT (password/security mismatch, or weak signal)";
