@@ -55,6 +55,15 @@ plain-text summary from there too.
 - **Survey (Mode 1):** `sequence,storage,floorplan,x_percent,y_percent,img_x,img_y,timestamp,rssi_dbm,target_ssid`
 - **Boot log (`/boot_log.csv`, every boot, any mode):** `sequence,storage,timestamp,reset_reason_code,reset_reason_label`
 
+`sequence` is a per-boot counter (starts fresh at 1 each time the device
+powers on), not a lifetime-unique ID across reboots — use `/boot_log.csv`
+or a timestamp discontinuity to tell sessions apart if you need to.
+
+`recommendation` and `target_ssid`/`floorplan` fields are quoted (and any
+internal `"` doubled) whenever their text contains a comma, quote, or
+newline, per standard CSV escaping — a parser that doesn't already handle
+quoted CSV fields will misread those rows.
+
 ## Status
 
 Actively field-tested; see the changelog comment block at the top of the

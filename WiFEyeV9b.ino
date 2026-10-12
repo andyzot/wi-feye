@@ -402,6 +402,39 @@
     raw/unweighted, so the Report tool's channel bar chart is unaffected)
     -- only which channel gets recommended changes. Renamed the sketch
     file to WiFEyeV9a.ino.
+  - Build 9b: four fixes from a code review of V9a. (1) FFat.begin()'s
+    format-on-fail flag changed from true to false -- a failed mount now
+    leaves the internal-flash fallback simply unavailable for that boot
+    rather than silently reformatting and erasing whatever log data was
+    already on there. (2) Added csvEscape() -- a reusable RFC4180-style
+    CSV field escaper (quote-wraps and doubles internal quotes whenever a
+    field contains a comma, quote, or newline) -- and applied it to every
+    free-text column across all three modes' CSV writers (recommendation,
+    target_ssid, the Mode 1 floorplan filename), since recommendation
+    text can itself contain commas (e.g. the congestion-channel phrasing)
+    and was being written completely unescaped. The companion Report
+    artifact's CSV parser was updated to match (proper quote-aware
+    splitting, replacing its old "only the last column can hold a comma"
+    shortcut, which was already wrong for these logs since recommendation
+    sits before target_ssid/gateway_ping_ms, not after). (3) No firmware
+    change -- confirmed the review's point that a periodic channel-survey
+    scan could itself contribute to Mode 3 disconnects is something to
+    verify by field-testing (duringChannelSurvey already flags this in
+    the logs), not a code defect; added a Diagnostics-screen toggle (see
+    next item) to make that A/B comparison practical without reflashing
+    between runs. (4) No firmware change -- confirmed globalLogSequence
+    resetting to 0 each boot (not persisted/lifetime-unique) was already
+    a deliberate, documented trade-off rather than an oversight; added a
+    README note instead so it's clear to anyone reading the CSVs later.
+    Also added: mode3CongestionScanEnabled, a runtime on/off switch for
+    Mode 3's periodic congestion scan (gates the WiFi.scanNetworks() call
+    in mode3Loop()), toggled via a new Yellow button on the Diagnostics
+    screen (More menu) -- defaults to enabled, not persisted across a
+    reboot, meant for a deliberate same-session with/without comparison.
+    showDiagnosticsScreen() now loops and redraws on Yellow instead of
+    being a single static screen; its content moved into a new
+    drawDiagnosticsScreenContents() so the loop doesn't duplicate it.
+    Renamed the sketch file to WiFEyeV9b.ino.
 */
 
 #include <SPI.h>
@@ -441,7 +474,7 @@ struct Mode3EventEntry;
 // Build 7: shown on the new Diagnostics screen (More menu) and worth
 // bumping by hand whenever a build is flashed, same spirit as the
 // Build 1/2/2.1/... notes in the big comment block above.
-#define FIRMWARE_VERSION "9a"
+#define FIRMWARE_VERSION "9b"
 
 // RSSI thresholds (dBm):
 //   >= -60 dBm : good / green
@@ -570,6 +603,29 @@ AppState app;
 // is one continuous count regardless of which log or which filesystem a
 // given row ended up on.
 unsigned long globalLogSequence = 0;
+
+// Build 9b: one reusable CSV-field escaping helper, applied to every
+// free-text field written into any of the CSV log files (recommendation
+// text, target SSID, floorplan filename) -- NOT the purely numeric/fixed-
+// enum columns (sequence, storage, rssi, timestamps, etc.), which can
+// never contain a comma and don't need it. Standard RFC4180-style rule:
+// if the field contains a comma, a double-quote, or a newline, wrap the
+// whole thing in double quotes and double up any quotes already inside
+// it. Left alone (no quotes added) when none of those characters are
+// present, so the vast majority of rows stay exactly as before -- only
+// the rare field that actually contains a comma (e.g. the congestion
+// recommendation text's "(N other nearby networks on it)" phrasing)
+// changes shape at all.
+String csvEscape(const String &field) {
+  bool needsQuoting = field.indexOf(',') >= 0 || field.indexOf('"') >= 0 ||
+                       field.indexOf('\n') >= 0 || field.indexOf('\r') >= 0;
+  if (!needsQuoting) {
+    return field;
+  }
+  String escaped = field;
+  escaped.replace("\"", "\"\"");
+  return "\"" + escaped + "\"";
+}
 
 // Confirmed touch calibration
 const int X_raw_min = 842;
@@ -883,6 +939,16 @@ bool popMode3Event(Mode3EventEntry &outEntry) {
 const unsigned long MODE3_CONGESTION_CHECK_INTERVAL_MS = 300000;   // 5 minutes
 bool mode3ScanPending = false;
 unsigned long mode3LastCongestionCheckMs = 0;
+
+// Build 9b: runtime on/off switch for the periodic congestion scan above,
+// toggled from the Diagnostics screen (More menu). Added so an A/B
+// comparison of Mode 3's disconnect rate with/without this scan running
+// can be done in one long sitting (toggle it, keep monitoring) rather than
+// needing two separate reflashes. Defaults to enabled (true) -- unchanged
+// behavior unless someone deliberately turns it off. Not persisted across
+// a reboot: it's meant for a deliberate same-session comparison, not a
+// permanent setting, so it resets to enabled every boot.
+bool mode3CongestionScanEnabled = true;
 int mode3NearbyApCount = 0;
 int mode3CongestionChannel = -1;
 int mode3RecommendedChannel = 0;   // Build 7.1: quietest of channels 1/6/11 by visible-AP count, set by buildChannelSurvey() each completed scan; 0 until the first scan completes
@@ -1204,7 +1270,7 @@ void appendCsvLine(float xPercent, float yPercent, int rssi, float imgX, float i
   globalLogSequence++;
   f.print(globalLogSequence);
   f.print(",SD,");
-  f.print(FLOORPLAN_FILE);
+  f.print(csvEscape(FLOORPLAN_FILE));
   f.print(",");
   f.print(xPercent, 2);
   f.print(",");
@@ -1222,7 +1288,7 @@ void appendCsvLine(float xPercent, float yPercent, int rssi, float imgX, float i
     f.print(rssi);
   }
   f.print(",");
-  f.println(activeTargetSsid);
+  f.println(csvEscape(activeTargetSsid));
   f.close();
 
   Serial.print("Logged to ");
@@ -2185,10 +2251,18 @@ void setup() {
   // already allocates (12.5MB) via FFat rather than LittleFS/SPIFFS — this
   // board's 16MB-flash partition schemes don't offer a SPIFFS option at
   // all, but FFat mounts that same FATFS partition that's already there,
-  // so no Partition Scheme change is needed. format-on-fail (the `true`
-  // below) is safe since this partition is only ever used by us.
-  if (!FFat.begin(true)) {
-    Serial.println("FFat mount failed — Mode 3's internal-flash log fallback won't be available this boot");
+  // so no Partition Scheme change is needed.
+  // Build 9b: changed format-on-fail from true to false. A failed mount
+  // could mean real corruption worth investigating (or recovering data
+  // from), not just "needs a first-time format" -- letting it silently
+  // reformat on any mount failure would erase whatever fallback logs
+  // were already on there, which is exactly the data you'd most want to
+  // keep in that scenario. If this partition genuinely has never been
+  // formatted (true first-ever boot), the fallback simply stays
+  // unavailable until it's formatted deliberately, rather than it
+  // happening silently as a side effect of some other mount problem.
+  if (!FFat.begin(false)) {
+    Serial.println("FFat mount failed — Mode 3's internal-flash log fallback won't be available this boot (not auto-formatted; existing data, if any, is preserved for investigation)");
   } else {
     Serial.println("FFat mounted OK (internal-flash fallback ready)");
   }
@@ -2503,7 +2577,39 @@ void showHelpScreen(int mode) {
 // Shows free heap/PSRAM, storage/RTC/WiFi availability, firmware version,
 // uptime, and (Build 7 items 3/4) the most recent WiFi disconnect reason
 // recorded this boot, if any.
+// Build 9b: now loops rather than being a single static screen, so the
+// new congestion-scan toggle (Yellow) can redraw its own changed state in
+// place without leaving and re-entering the screen. Green still returns
+// to the More menu, same as before.
 void showDiagnosticsScreen() {
+  waitForRelease(BTN_GREEN);   // the press that opened this screen is still being held
+  bool firstDraw = true;
+  while (true) {
+    if (!firstDraw) {
+      waitForRelease(BTN_YELLOW);
+    }
+    firstDraw = false;
+    drawDiagnosticsScreenContents();
+
+    // Wait for either button: Yellow toggles and redraws, Green returns.
+    while (digitalRead(BTN_GREEN) == HIGH && digitalRead(BTN_YELLOW) == HIGH) {
+      delay(10);
+    }
+    if (digitalRead(BTN_GREEN) == LOW) {
+      waitForRelease(BTN_GREEN);
+      return;
+    }
+    // Otherwise it was Yellow -- toggle and loop back around to redraw.
+    mode3CongestionScanEnabled = !mode3CongestionScanEnabled;
+    Serial.print("Mode 3 congestion scan: ");
+    Serial.println(mode3CongestionScanEnabled ? "enabled" : "disabled (A/B test)");
+  }
+}
+
+// Draws the Diagnostics screen's actual content (split out from
+// showDiagnosticsScreen() in Build 9b so the toggle loop above can redraw
+// it without duplicating this whole block).
+void drawDiagnosticsScreenContents() {
   tft.fillScreen(ILI9341_BLACK);
   tft.setTextColor(ILI9341_WHITE);
   tft.setTextSize(2);
@@ -2579,6 +2685,13 @@ void showDiagnosticsScreen() {
   }
   y += lineH;
 
+  // Build 9b: shows and lets you flip the congestion-scan A/B toggle --
+  // see mode3CongestionScanEnabled above (gates the scan in mode3Loop()).
+  tft.setCursor(10, y);
+  tft.print("Congestion scan: ");
+  tft.println(mode3CongestionScanEnabled ? "ON" : "OFF (A/B test)");
+  y += lineH;
+
   // A dropped-sample/sequence-gap indicator was optional per the spec --
   // skipped here: detecting one cheaply would mean persisting the last
   // sequence number across reboots (e.g. a tiny marker file on SD/FFat)
@@ -2588,11 +2701,7 @@ void showDiagnosticsScreen() {
 
   tft.setTextColor(ILI9341_YELLOW);
   tft.setCursor(10, SCREEN_H - 15);
-  tft.println("Press Green to return.");
-
-  waitForRelease(BTN_GREEN);
-  while (digitalRead(BTN_GREEN) == HIGH) delay(10);
-  waitForRelease(BTN_GREEN);
+  tft.println("Yellow: toggle scan. Green: return.");
 }
 
 // Build 7.2: this used to just print instructions pointing at Mode 3's
@@ -3032,9 +3141,9 @@ void appendWalkCsvLineToFallback(const char *event, int zone, int rssi, int avgR
   f.print(",");
   f.print(avgRssi);
   f.print(",");
-  f.print(recommendation);
+  f.print(csvEscape(recommendation));
   f.print(",");
-  f.println(activeTargetSsid);
+  f.println(csvEscape(activeTargetSsid));
   f.close();
   Serial.println("Mode 2: SD write failed (or no card) — line saved to internal flash fallback instead (/walk_survey_fallback.csv)");
 }
@@ -3094,9 +3203,9 @@ void appendWalkCsvLine(const char *event, int zone, int rssi, int avgRssi, const
   f.print(",");
   f.print(avgRssi);
   f.print(",");
-  f.print(recommendation);
+  f.print(csvEscape(recommendation));
   f.print(",");
-  f.println(activeTargetSsid);
+  f.println(csvEscape(activeTargetSsid));
   f.close();
 }
 
@@ -3494,7 +3603,7 @@ void appendMonitorLogLineToFallback(const char *event, int rssi, const String &r
     f.print(rssi);
   }
   f.print(",");
-  f.print(recommendation);
+  f.print(csvEscape(recommendation));
   f.print(",");
   f.println(pingMs);
   f.close();
@@ -3544,7 +3653,7 @@ void appendMonitorLogLine(const char *event, int rssi, const String &recommendat
     f.print(rssi);
   }
   f.print(",");
-  f.print(recommendation);
+  f.print(csvEscape(recommendation));
   f.print(",");
   f.println(pingMs);
   f.close();
@@ -4427,8 +4536,10 @@ void mode3Loop() {
   }
 
   // --- Occasional channel-congestion check while connected (async, see
-  // checkMode3CongestionScan() above) ---
-  if (app.mode3State == MODE3_CONNECTED && !mode3ScanPending &&
+  // checkMode3CongestionScan() above). Build 9b: gated on
+  // mode3CongestionScanEnabled (Diagnostics-screen toggle) so it can be
+  // switched off for an A/B disconnect-rate comparison without a reflash.
+  if (app.mode3State == MODE3_CONNECTED && !mode3ScanPending && mode3CongestionScanEnabled &&
       millis() - mode3LastCongestionCheckMs >= MODE3_CONGESTION_CHECK_INTERVAL_MS) {
     WiFi.scanNetworks(true);
     mode3ScanPending = true;
