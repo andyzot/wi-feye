@@ -435,6 +435,36 @@
     being a single static screen; its content moved into a new
     drawDiagnosticsScreenContents() so the loop doesn't duplicate it.
     Renamed the sketch file to WiFEyeV9b.ino.
+  - Build 9b (continued): two more corrections from a second review pass,
+    before this build had actually been flashed/tested, so folded into
+    the same build rather than becoming its own letter. (1) The adjacent-
+    channel-overlap weighting added in 9a summed raw counts over three
+    differently-sized flat windows (1-4, 4-8, 8-13 -- 4, 5, and 6
+    channels wide respectively), which biased the comparison: a wider
+    window picks up more raw count regardless of whether those channels
+    are actually noisier, so channel 11 was being scored on an unequal
+    footing against channel 1. Replaced with a single triangular
+    weighting kernel (full weight at 0 channel-separation, fading
+    linearly to 0 by 5 channels apart) applied identically to all three
+    candidates, just centered differently -- now an apples-to-apples
+    comparison regardless of how many channels fall in range of each.
+    Tie-break logic unchanged in spirit, now compares floats with a small
+    epsilon rather than ints. The Report artifact's channel-survey panel
+    text was also corrected to describe the new kernel instead of the
+    old flat-window scheme, with a note that an old 9a-logged
+    recommendation may not match what 9b would pick from the same raw
+    counts. (2) Mode 3's event queue (MODE3_EVENT_QUEUE_LEN=8, 7 usable
+    slots) silently discarded a new event when full, with a comment that
+    incorrectly claimed the OLDEST entry gets dropped -- the code has
+    always dropped the NEWEST (incoming) one instead, since evicting an
+    already-queued entry under lock would risk the consumer reading
+    stale data. Comment corrected to describe the actual behavior, and a
+    new mode3EventQueueOverflowCount tracks how many pushMode3Event()
+    calls were dropped; mode3Loop() reads-and-clears it after each drain
+    and, if non-zero, logs a MISSED_EVENTS row (and a Serial warning) so
+    a burst of transitions during a queue-full moment leaves a visible
+    trace in the CSV rather than a silent, unexplained gap in the
+    drop-count/uptime bookkeeping.
 */
 
 #include <SPI.h>
@@ -892,24 +922,42 @@ struct Mode3EventEntry {
   bool duringChannelSurvey;   // Build 7.5 item 2: true if a channel-survey scan (WiFi.scanNetworks()) was in flight at the moment this happened -- that scan briefly takes the radio off the connected channel, so a disconnect right then may be the scan's own side effect rather than a genuine AP-side drop
   uint32_t atMs;              // millis() when SysProvEvent() actually saw this, not when mode3Loop() got around to draining it -- more accurate for the connected-time/drop bookkeeping than the old single read-it-when-you-notice-it approach
 };
-const int MODE3_EVENT_QUEUE_LEN = 8;
+const int MODE3_EVENT_QUEUE_LEN = 8;   // ring buffer holds at most LEN-1 = 7 unread entries at once (head==tail means empty, so one slot is always kept free to tell empty apart from full)
 Mode3EventEntry mode3EventQueue[MODE3_EVENT_QUEUE_LEN];
 volatile int mode3EventQueueHead = 0;   // next slot the producer (SysProvEvent) writes
 volatile int mode3EventQueueTail = 0;   // next slot the consumer (mode3Loop) reads
 portMUX_TYPE mode3EventQueueMux = portMUX_INITIALIZER_UNLOCKED;
 
+// Build 9b: counts how many events pushMode3Event() has had to drop
+// because the queue was completely full. Checked/reported (and reset to
+// 0) from mode3Loop() after each drain -- see the MISSED_EVENTS row near
+// popMode3Event()'s call site. Plain (not atomic/mutex'd) increments on a
+// uint32_t from a single producer are fine here; this is a diagnostic
+// counter, not something that needs to be exact to the integer.
+volatile uint32_t mode3EventQueueOverflowCount = 0;
+
 // Pushes one event onto the queue -- called only from SysProvEvent() (the
-// producer). If the queue is ever completely full (it would take 8 real
+// producer). If the queue is ever completely full (it would take 7 real
 // transitions queueing up between two mode3Loop() iterations, which in
-// practice never happens) the oldest unread entry is dropped rather than
-// overwriting the producer's own bookkeeping -- logging slightly late
-// beats corrupting the ring buffer.
+// practice never happens), the correction here: this NEW event is the one
+// dropped, not the oldest one already queued -- overwriting a slot that's
+// still waiting to be read would corrupt the ring buffer (the consumer
+// would see stale/already-advanced data at that index), so there's no
+// cheap way to evict the oldest entry instead without risking that. The
+// previous version of this comment claimed the oldest entry gets dropped,
+// which was never what the code below actually does. Logging slightly
+// late and silently losing nothing would both be nicer than this, but
+// losing the newest entry (and now at least counting it) is the safe
+// choice given the actual code. mode3EventQueueOverflowCount is
+// incremented so the loss is at least visible rather than silent.
 void pushMode3Event(const Mode3EventEntry &entry) {
   portENTER_CRITICAL(&mode3EventQueueMux);
   int nextHead = (mode3EventQueueHead + 1) % MODE3_EVENT_QUEUE_LEN;
   if (nextHead != mode3EventQueueTail) {   // room for it
     mode3EventQueue[mode3EventQueueHead] = entry;
     mode3EventQueueHead = nextHead;
+  } else {
+    mode3EventQueueOverflowCount++;
   }
   portEXIT_CRITICAL(&mode3EventQueueMux);
 }
@@ -4269,31 +4317,54 @@ String buildChannelSurvey(int n, int currentChannel, int *outRecommended, const 
     if (WiFi.RSSI(i) > -80) counts[ch]++;
   }
 
-  // Build 9a: adjacent-channel-overlap weighting. A raw per-channel count
-  // (the old comparison) only credits an AP sitting exactly on 1, 6 or 11 --
-  // but 2.4GHz 20MHz-wide channels bleed into their neighbors, so an AP on
-  // channel 3 or 4 still eats into channel 1's real airtime even though it
-  // never shows up in counts[1]. Score each of the three non-overlapping
-  // candidates by summing the raw counts across the channels it actually
-  // overlaps: 1 -> 1-4, 6 -> 4-8, 11 -> 8-13 (each candidate is 20MHz wide,
-  // +/-2 channels either side at 5MHz/channel spacing). Still just a count
-  // of other visible networks, same honesty caveat as before -- this is a
-  // better same-radio-category estimate, not a traffic/airtime measurement.
-  int weighted1 = counts[1] + counts[2] + counts[3] + counts[4];
-  int weighted6 = counts[4] + counts[5] + counts[6] + counts[7] + counts[8];
-  int weighted11 = counts[8] + counts[9] + counts[10] + counts[11] + counts[12] + counts[13];
+  // Build 9a/9b: adjacent-channel-overlap weighting. A raw per-channel
+  // count (the original comparison) only credits an AP sitting exactly on
+  // 1, 6 or 11 -- but 2.4GHz 20MHz-wide channels bleed into their
+  // neighbors, so an AP on channel 3 or 4 still eats into channel 1's real
+  // airtime even though it never shows up in counts[1].
+  //
+  // Build 9a's first attempt at this summed raw counts over a fixed
+  // window per candidate (1->1-4, 6->4-8, 11->8-13) -- caught in review as
+  // biased: those windows are 4, 5, and 6 channels wide respectively, so
+  // channel 11's score was being compared against channel 1's on an
+  // unequal footing (summing more raw counts, from a wider window of
+  // neighbors, regardless of how noisy any of them actually were) rather
+  // than because 11 genuinely has more real-world overlap exposure than
+  // 1 does. Fixed by using the SAME-shaped weighting kernel centered on
+  // each candidate instead of three differently-sized flat windows: a
+  // triangular falloff from full weight at zero channel-separation to
+  // zero weight at 5 channels apart (5 channels x 5MHz spacing = 25MHz,
+  // comfortably past where two 20MHz-wide channels stop overlapping at
+  // all), linear in between. Every candidate's score is now a sum over
+  // the same five-step kernel shape, just slid to a different center, so
+  // comparing the three is apples-to-apples regardless of how many
+  // channels happen to fall within range of each.
+  auto overlapWeight = [](int distance) -> float {
+    if (distance >= 5) return 0.0f;
+    return (5 - distance) / 5.0f;   // 0:1.0  1:0.8  2:0.6  3:0.4  4:0.2
+  };
+  float weighted1 = 0, weighted6 = 0, weighted11 = 0;
+  for (int ch = 1; ch <= 13; ch++) {
+    if (counts[ch] == 0) continue;
+    weighted1  += counts[ch] * overlapWeight(abs(ch - 1));
+    weighted6  += counts[ch] * overlapWeight(abs(ch - 6));
+    weighted11 += counts[ch] * overlapWeight(abs(ch - 11));
+  }
 
   // Build 7.5: tie-break fix, unchanged in spirit -- start from the current
   // channel (if it's one of the three candidates; falls back to 1 if not)
   // and only move away when another candidate's WEIGHTED score is STRICTLY
-  // lower, so a tie keeps the recommendation as "stay put" rather than
-  // bouncing to channel 1 by default.
+  // lower (a small float epsilon guards against two scores that are
+  // mathematically equal but land a hair apart after floating-point
+  // rounding), so a genuine tie keeps the recommendation as "stay put"
+  // rather than bouncing to channel 1 by default.
   int best = (currentChannel == 1 || currentChannel == 6 || currentChannel == 11) ? currentChannel : 1;
   const int nonOverlapping[3] = {1, 6, 11};
-  const int weighted[3] = {weighted1, weighted6, weighted11};
-  int bestWeighted = (best == 1) ? weighted1 : (best == 6) ? weighted6 : weighted11;
+  const float weighted[3] = {weighted1, weighted6, weighted11};
+  const float TIE_EPSILON = 0.001f;
+  float bestWeighted = (best == 1) ? weighted1 : (best == 6) ? weighted6 : weighted11;
   for (int k = 0; k < 3; k++) {
-    if (weighted[k] < bestWeighted) {
+    if (weighted[k] < bestWeighted - TIE_EPSILON) {
       best = nonOverlapping[k];
       bestWeighted = weighted[k];
     }
@@ -4311,7 +4382,7 @@ String buildChannelSurvey(int n, int currentChannel, int *outRecommended, const 
     out += " (already quietest of 1/6/11 by adjacent-channel-weighted score)";
   }
   out += " -- visible-AP counts only (>-80dBm), 2.4GHz only, not traffic volume or non-WiFi interference;"
-         " recommendation weighted for adjacent-channel overlap (ch1~1-4, ch6~4-8, ch11~8-13), per-channel counts above are raw/unweighted";
+         " recommendation weighted for adjacent-channel overlap (triangular falloff, same-shaped kernel per candidate, zero weight beyond 5 channels apart), per-channel counts above are raw/unweighted";
   return out;
 }
 
@@ -4520,6 +4591,27 @@ void mode3Loop() {
     }
     mode3LastStateChangeMs = entry.atMs;
     refreshMode3Screen();
+  }
+
+  // Build 9b: report the event-queue overflow counter if pushMode3Event()
+  // had to drop anything since the last time this ran. Reads-then-clears
+  // under the same spinlock the producer uses, so a push arriving in the
+  // tiny window between the read and the clear isn't lost -- it would
+  // just show up folded into next time's count instead, which is fine for
+  // a diagnostic figure. Logged as its own row rather than just a Serial
+  // print so it survives in the CSV even if nobody's watching the serial
+  // monitor at the time.
+  uint32_t droppedEvents;
+  portENTER_CRITICAL(&mode3EventQueueMux);
+  droppedEvents = mode3EventQueueOverflowCount;
+  mode3EventQueueOverflowCount = 0;
+  portEXIT_CRITICAL(&mode3EventQueueMux);
+  if (droppedEvents > 0) {
+    Serial.print("Mode 3: WARNING -- event queue overflowed, ");
+    Serial.print(droppedEvents);
+    Serial.println(" connection event(s) dropped (not logged)");
+    appendMonitorLogLine("MISSED_EVENTS", RSSI_NOT_FOUND,
+                          String(droppedEvents) + " connection event(s) were dropped because the internal event queue filled up -- this boot's drop count/uptime bookkeeping may be missing some transitions from this gap.", "");
   }
 
   // --- Build 7 item 1: a disconnect that hasn't resolved within the grace

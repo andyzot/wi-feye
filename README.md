@@ -64,6 +64,12 @@ internal `"` doubled) whenever their text contains a comma, quote, or
 newline, per standard CSV escaping — a parser that doesn't already handle
 quoted CSV fields will misread those rows.
 
+A `MISSED_EVENTS` row can appear in the Monitor (Mode 3) log if the
+internal connection-event queue ever filled up between two check cycles
+(7-event capacity, meant to never be hit in normal use) — it means one or
+more DISCONNECTED/CONNECTED transitions in that window weren't logged, so
+the drop-count/uptime figures for that stretch may be incomplete.
+
 ## Status
 
 Actively field-tested; see the changelog comment block at the top of the
