@@ -547,6 +547,26 @@
 // need a reference to the type, not its full definition.
 struct Mode3EventEntry;
 
+// Build 9b follow-up: return value for enterModeOnce()/pickAndLoadFloorPlan()
+// -- see enterMode()'s own comment, much further down, for why these no
+// longer recurse into each other. This has to sit here, immediately after
+// Mode3EventEntry just above, and NOT merely "somewhere before AppState" --
+// an earlier pass placed it right before AppState (after Mode3ConnectionState)
+// and that still failed to compile ("'ModeEntryResult' does not name a
+// type"), because Arduino's auto-generated prototypes are inserted right
+// after this #include block, before the sketch's very first function
+// definition (waitForRelease(), further down) -- not merely "before
+// AppState". Mode3ConnectionState gets away with sitting later because it's
+// never used as a bare function parameter/return type, only as an AppState
+// member; ModeEntryResult IS used directly in function signatures
+// (pickAndLoadFloorPlan(), enterModeOnce()), so like Mode3EventEntry it has
+// to exist this early, before any function, not just before the struct that
+// happens to follow it.
+enum ModeEntryResult {
+  MODE_ENTRY_RUNNING,       // a real mode is running, OR pickAndLoadFloorPlan() hit one of its own non-recursive error returns (no floor plans found, JPEG decode failed, etc.) -- either way, stop the selection loop and let loop() dispatch app.currentMode as normal
+  MODE_ENTRY_BACK_TO_MENU,  // show the mode menu again
+};
+
 // Build 7: shown on the new Diagnostics screen (More menu) and worth
 // bumping by hand whenever a build is flashed, same spirit as the
 // Build 1/2/2.1/... notes in the big comment block above.
@@ -640,18 +660,6 @@ enum Mode3ConnectionState {
   MODE3_CONNECTING,    // WiFi.begin()/SoftAP provisioning in progress. Covers both "never provisioned yet, waiting for the phone app" and "provisioned, trying to associate" as ONE state rather than splitting it into a 5th on-screen case -- the status screen's existing "Waiting for setup..." wording already covered both as one bucket, so this build keeps that instead of inventing new wording for a distinction nobody asked for.
   MODE3_CONNECTED,     // got an IP, currently associated
   MODE3_RECONNECTING   // was connected, just disconnected; auto-reconnect gets a short grace window (MODE3_RECONNECT_GRACE_MS) before this is demoted to MODE3_OFFLINE and logged as a genuine sustained loss
-};
-
-// Build 9b follow-up: return value for enterModeOnce()/pickAndLoadFloorPlan()
-// -- see enterMode()'s own comment, much further down, for why these no
-// longer recurse into each other. Declared all the way up here, rather
-// than beside the functions that actually use it, for the same reason
-// Mode3EventEntry is forward-declared just above: Arduino's auto-generated
-// function prototypes are inserted near the top of the file, so any
-// custom type used in a function signature has to already exist by then.
-enum ModeEntryResult {
-  MODE_ENTRY_RUNNING,       // a real mode is running, OR pickAndLoadFloorPlan() hit one of its own non-recursive error returns (no floor plans found, JPEG decode failed, etc.) -- either way, stop the selection loop and let loop() dispatch app.currentMode as normal
-  MODE_ENTRY_BACK_TO_MENU,  // show the mode menu again
 };
 
 struct AppState {
