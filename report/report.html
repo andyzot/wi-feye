@@ -570,7 +570,22 @@ function isValidSurveyPoint(r){
    meaning a different absolute dBm in different surveys -- the legend
    is filled in with the actual dBm bounds each time specifically so
    that's never hidden. See rssiToRGB()'s lo/hi params and the legend
-   update in renderSurvey(). ---------- */
+   update in renderSurvey().
+
+   Quantized into HEAT_BANDS discrete steps rather than blended
+   continuously, on user feedback that a smoothly-blended render (even
+   after the per-survey rescale above, and even after tuning IDW's own
+   power way up) still read as a couple of soft, merged washes rather
+   than the distinct, sharp-edged blobs of a reference "professional"
+   heatmap image they compared against. That reference's look is a
+   contour-map one: a handful of flat color bands with a hard edge
+   wherever the underlying (still perfectly smooth/continuous) signal
+   field crosses a threshold, the same idea as elevation contour lines
+   -- NOT smaller/tighter blending. Once banding does that visual job,
+   IDW's power can go back down to something closer to physically
+   reasonable falloff (see the call site in drawHeatmap) instead of the
+   artificially cranked-up value an earlier attempt at this used to
+   fake sharp edges through pure distance-decay alone. ---------- */
 const HEAT_STOPS = [
   [0.00, [217, 54, 54]],   // --bad   (this survey's weakest reading)
   [0.25, [214, 94, 29]],
@@ -578,11 +593,8 @@ const HEAT_STOPS = [
   [0.75, [120, 140, 26]],
   [1.00, [31, 157, 85]],   // --good  (this survey's strongest reading)
 ];
-function rssiToRGB(rssi, lo, hi){
-  // Degenerate case: every sample read the same, or lo/hi weren't
-  // passed -- nothing to scale against, so just render the top of the
-  // ramp rather than dividing by zero.
-  const t = hi > lo ? Math.max(0, Math.min(1, (rssi - lo) / (hi - lo))) : 1;
+const HEAT_BANDS = 8;
+function colorAtT(t){
   for (let i = 0; i < HEAT_STOPS.length - 1; i++){
     const [a, ca] = HEAT_STOPS[i], [b, cb] = HEAT_STOPS[i+1];
     if (t >= a && t <= b){
@@ -595,6 +607,18 @@ function rssiToRGB(rssi, lo, hi){
     }
   }
   return HEAT_STOPS[HEAT_STOPS.length-1][1];
+}
+function rssiToRGB(rssi, lo, hi){
+  // Degenerate case: every sample read the same, or lo/hi weren't
+  // passed -- nothing to scale against, so just render the top of the
+  // ramp rather than dividing by zero.
+  const t = hi > lo ? Math.max(0, Math.min(1, (rssi - lo) / (hi - lo))) : 1;
+  // Snap to the band's own center color (not its raw edge) so each
+  // band renders as one flat, readable color rather than still
+  // blending across its own width.
+  const bandIdx = Math.min(HEAT_BANDS - 1, Math.floor(t * HEAT_BANDS));
+  const bandT = (bandIdx + 0.5) / HEAT_BANDS;
+  return colorAtT(bandT);
 }
 
 /* ---------- state ---------- */
@@ -1570,18 +1594,18 @@ function drawHeatmap(canvas, samples, dispW, dispH, lo, hi){
   for (let gy = 0; gy < GH; gy++){
     for (let gx = 0; gx < GW; gx++){
       const xPct = (gx + 0.5) / GW * 100, yPct = (gy + 0.5) / GH * 100;
-      // Power 7 (up from an earlier 4): with a typically sparse survey
-      // (tens of taps across a whole room, not hundreds), there's no
-      // real data to justify the fine, cellular local texture a dense
-      // professional survey's heatmap shows -- but a higher power still
-      // gets closer to that look by letting each tap's own reading
-      // dominate its own neighborhood more sharply before blending into
-      // the next one, rather than smearing broadly across the whole
-      // unsampled gap. Still smooth, continuous IDW underneath (no hard
-      // radius cutoff -- see the HEAT_STOPS comment above for why that
-      // was rejected), so it never produces a flat "dead zone"; it just
-      // makes each tap's zone of influence narrower.
-      const v = idwValue(xPct, yPct, samples, 7);
+      // Power 3: left close to a physically-reasonable distance falloff
+      // -- the earlier attempt at a "distinct blobs" look cranked this
+      // all the way to 7, which does carve sharper per-point zones, but
+      // only by making distance decay itself extreme (approaching
+      // nearest-neighbor/Voronoi as power climbs further). That's no
+      // longer needed: HEAT_BANDS quantization (see above) is what now
+      // produces the sharp-edged contour-map look the reference image
+      // actually has, so the interpolation underneath it is free to
+      // stay smooth and go back to a milder power. Still no hard radius
+      // cutoff -- see the HEAT_STOPS comment above for why that's
+      // rejected either way.
+      const v = idwValue(xPct, yPct, samples, 3);
       const [r,g,b] = rssiToRGB(v, lo, hi);
       const idx = (gy*GW + gx) * 4;
       data.data[idx] = r; data.data[idx+1] = g; data.data[idx+2] = b; data.data[idx+3] = Math.round(0.72*255);
@@ -1638,7 +1662,7 @@ function renderSurvey(survey){
     document.getElementById("heatLegendLo").textContent = `${Math.round(heatLo)} dBm`;
     document.getElementById("heatLegendHi").textContent = `${Math.round(heatHi)} dBm`;
     note.hidden = false;
-    note.textContent = `Color is scaled to this survey's own readings (${Math.round(heatLo)} to ${Math.round(heatHi)} dBm here) rather than a fixed scale, so it isn't directly comparable to a heatmap from a different survey. Interpolated between taps (inverse-distance weighting), not measured — treat it as an estimate, less reliable far from any tap or with few points logged.`;
+    note.textContent = `Color is scaled to this survey's own readings (${Math.round(heatLo)} to ${Math.round(heatHi)} dBm here) rather than a fixed scale, so it isn't directly comparable to a heatmap from a different survey. Shown as contour-style bands, not a smooth gradient, and interpolated between taps (inverse-distance weighting) rather than measured everywhere — treat it as an estimate, less reliable far from any tap or with few points logged.`;
   } else {
     note.hidden = true;
   }
