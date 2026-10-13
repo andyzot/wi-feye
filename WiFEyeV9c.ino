@@ -1155,6 +1155,28 @@ int mode3NearbyApCount = 0;
 int mode3CongestionChannel = -1;
 int mode3RecommendedChannel = 0;   // Build 7.1: quietest of channels 1/6/11 by visible-AP count, set by buildChannelSurvey() each completed scan; 0 until the first scan completes
 
+// Build 9c: "sticky client" detection -- rides the same periodic congestion
+// scan above rather than its own schedule (see checkMode3CongestionScan()).
+// Each completed scan, we look for another BSSID broadcasting OUR OWN SSID
+// (a sibling AP/mesh node on the same network, the opposite filter from
+// countMode3NearbyApsOnChannel()'s "other networks" count) and compare its
+// RSSI to ours from that same scan. If an alternate is meaningfully
+// stronger for several consecutive checks in a row, this device's own WiFi
+// stack is staying on a weaker AP rather than roaming -- logged as a
+// STICKY_CLIENT row rather than just the first occurrence, so a single
+// noisy reading (normal RSSI fluctuation) doesn't get flagged on its own.
+// Single-AP networks never trigger this: there's no sibling BSSID to find,
+// so findBestAlternateSameSsidBssid() just returns false every time.
+// IMPORTANT CAVEAT (also written into the logged row itself, and belongs in
+// the report): this reflects the ESP32's own bare WiFi driver's roaming
+// behaviour, not necessarily a phone's or laptop's -- most consumer devices
+// have 802.11k/v/r-assisted or vendor-specific roaming logic this sketch
+// doesn't implement, so "would an unassisted client get stuck here" isn't
+// the same claim as "your phone will get stuck here."
+const int STICKY_RSSI_GAP_DB = 15;        // alternate must be at least this many dB stronger to count
+const int STICKY_STREAK_TO_LOG = 2;       // consecutive congestion-scan cycles (2 x 5min = 10min) before logging
+int mode3StickyStreak = 0;                // consecutive cycles the gap condition has held; resets to 0 otherwise
+
 // Build 7.5: a code review raised heavy String usage (heap-free bytes
 // drifting down over days/weeks of continuous Mode 3 monitoring) as a
 // theoretical risk. Rather than guess, this turns it into something
@@ -4344,6 +4366,7 @@ void startMode3() {
     mode3LastCongestionCheckMs = millis();
     mode3NearbyApCount = 0;
     mode3CongestionChannel = -1;
+    mode3StickyStreak = 0;
     blueHoldStartMs = 0;
     mode3AlertActive = false;   // leftover from a previous Mode 3 session this boot shouldn't carry over
     noTone(PIEZO);
@@ -4516,6 +4539,52 @@ int countMode3NearbyApsOnChannel(int n, int targetChannel, const uint8_t *myBssi
     if (WiFi.RSSI(i) > -80) count++;
   }
   return count;
+}
+
+// Build 9c: the opposite filter from countMode3NearbyApsOnChannel() -- that
+// function deliberately EXCLUDES our own SSID (it's counting competing
+// networks); this one looks for OTHER BSSIDs broadcasting the SAME SSID we
+// are connected to (a sibling AP or mesh node), which is exactly what
+// countMode3NearbyApsOnChannel() has no reason to track. Returns the
+// strongest such alternate's RSSI/channel via the out-params, or false if
+// none was seen in this scan (including the common case of a single-AP
+// network, where there's nothing to find).
+bool findBestAlternateSameSsidBssid(int n, const String &mySSID, const uint8_t *myBssid, int *altRssiOut, int *altChannelOut) {
+  int best = RSSI_NOT_FOUND;
+  int bestChannel = -1;
+  for (int i = 0; i < n; i++) {
+    if (WiFi.SSID(i) != mySSID) continue;
+    if (isSiblingRadio(i, myBssid)) continue;   // same physical radio, different SSID -- not an alternate AP
+    uint8_t *bssid = WiFi.BSSID(i);
+    if (bssid == nullptr) continue;
+    bool isMine = true;
+    for (int o = 0; o < 6; o++) { if (bssid[o] != myBssid[o]) { isMine = false; break; } }
+    if (isMine) continue;
+    int rssi = WiFi.RSSI(i);
+    if (best == RSSI_NOT_FOUND || rssi > best) { best = rssi; bestChannel = WiFi.channel(i); }
+  }
+  if (best == RSSI_NOT_FOUND) return false;
+  *altRssiOut = best;
+  *altChannelOut = bestChannel;
+  return true;
+}
+
+// Build 9c: our own AP's RSSI as seen in THIS scan (same instant as
+// whatever findBestAlternateSameSsidBssid() finds), rather than
+// mode3LastKnownRssi -- that reading is only refreshed every
+// MODE3_SAMPLE_INTERVAL_MS and can be stale relative to this scan by design
+// (see buildInterferenceNote()'s comment on the same staleness). Returns
+// RSSI_NOT_FOUND in the rare case our own AP didn't show up in this
+// particular scan (channel-hop timing).
+int findMyBssidRssiInScan(int n, const uint8_t *myBssid) {
+  for (int i = 0; i < n; i++) {
+    uint8_t *bssid = WiFi.BSSID(i);
+    if (bssid == nullptr) continue;
+    bool isMine = true;
+    for (int o = 0; o < 6; o++) { if (bssid[o] != myBssid[o]) { isMine = false; break; } }
+    if (isMine) return WiFi.RSSI(i);
+  }
+  return RSSI_NOT_FOUND;
 }
 
 // Build 1: flags a disconnect that doesn't fit the usual "weak signal" or
@@ -4789,6 +4858,27 @@ void checkMode3CongestionScan() {
     // own comment for what this can and can't tell you.
     String channelSurvey = buildChannelSurvey(n, channel, &mode3RecommendedChannel, myBssid);
     appendMonitorLogLine("CHANNEL_SURVEY", RSSI_NOT_FOUND, channelSurvey, "");
+
+    // Build 9c: sticky-client check -- same scan, no extra radio cost.
+    int altRssi = 0, altChannel = -1;
+    int myRssi = findMyBssidRssiInScan(n, myBssid);
+    bool haveAlt = findBestAlternateSameSsidBssid(n, WiFi.SSID(), myBssid, &altRssi, &altChannel);
+    if (haveAlt && myRssi != RSSI_NOT_FOUND && (altRssi - myRssi) >= STICKY_RSSI_GAP_DB) {
+      mode3StickyStreak++;
+    } else {
+      mode3StickyStreak = 0;
+    }
+    if (mode3StickyStreak >= STICKY_STREAK_TO_LOG) {
+      String note = "Staying on a " + String(myRssi) + " dBm AP (channel " + String(channel) +
+        ") while a sibling AP on the same network measured " + String(altRssi) + " dBm (channel " +
+        String(altChannel) + ") -- " + String(altRssi - myRssi) + " dB stronger, for " +
+        String(mode3StickyStreak) + " consecutive checks (~" + String(mode3StickyStreak * (MODE3_CONGESTION_CHECK_INTERVAL_MS / 60000)) +
+        " min). This is this device's own WiFi stack not roaming despite a stronger sibling AP being "
+        "in range -- it reflects the ESP32's bare roaming behaviour, not necessarily what a phone or "
+        "laptop with smarter (802.11k/v/r or vendor-assisted) roaming would do on the same network.";
+      appendMonitorLogLine("STICKY_CLIENT", myRssi, note, "");
+      Serial.println("Mode 3: " + note);
+    }
   }
   WiFi.scanDelete();
   mode3ScanPending = false;
