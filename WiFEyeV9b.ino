@@ -511,6 +511,53 @@
     fileServer.sendContent() instead of building the whole page into one
     String first, so it no longer has any reallocation risk on a card
     with many files (replacing the earlier html.reserve(4096) mitigation).
+    Third pass -- a compile-error fix plus another round of review items.
+    ModeEntryResult (item 6 above) didn't actually compile in a real
+    Arduino IDE build (ESP32 core 3.3.12): it was declared right before
+    AppState, textually before the two functions that use it but still
+    AFTER the sketch's first function definition (waitForRelease()) --
+    and Arduino's auto-generated prototypes are inserted right after the
+    #include block, before that first function, not merely "before
+    AppState". Moved to sit immediately after the existing Mode3EventEntry
+    forward declaration instead, which is early enough. Also: (8)
+    pickAndLoadFloorPlan()'s own failure returns (no floor plan found,
+    JPEG header read/decode failure, PSRAM allocation failure) used to
+    return MODE_ENTRY_RUNNING with imgBuffer left null -- since
+    mode1Loop()'s first line is "if (imgBuffer == nullptr) return;", that
+    silently dropped the user into a Mode 1 that returned every frame
+    before ever reading BTN_HELP or BTN_GREEN, with no way back to the
+    picker short of a power cycle. All four now return
+    MODE_ENTRY_BACK_TO_MENU, same as "no SD card". (9) Mode 2's traffic
+    light (and the piezo tone it drives) now has a small hysteresis
+    margin (BAND_HYSTERESIS_DB, 3 dB) around the green/amber and
+    amber/red boundaries, on top of the existing RSSI history averaging,
+    so a reading that happens to sit right on a threshold doesn't flip
+    the display back and forth every scan. (10) The DISCONNECTED row's
+    interference note now says outright that the signal reading behind it
+    (mode3LastKnownRssi) can be up to ~30s stale -- it's only refreshed on
+    MODE3_SAMPLE_INTERVAL_MS's periodic sample, not at the instant of
+    disconnect. (11) countMode3NearbyApsOnChannel() now also reports how
+    many scan entries it excluded as sibling BSSIDs on the connected
+    channel, logged alongside the existing congestion count, so a
+    mis-set SIBLING_RADIO_MATCH_OCTETS would actually show up in the
+    Serial log instead of just quietly undercounting. (12)
+    fileListRowHtml() now HTML-escapes filenames before building the file
+    list page -- names come from the SD/flash directory listing, not an
+    HTTP request, so this isn't closing an attacker-reachable hole, but
+    it keeps this page consistent with the file server's other hardening.
+    (13) noteBuf in the DISCONNECTED path grew from 400 to 576 bytes for
+    real headroom against the now-longer interference note (worst case
+    ~488 bytes; snprintf would have truncated rather than overflowed
+    either way, but the margin had gotten thin). Left for a future pass,
+    documented in place rather than fixed now: a formatTimestamp(char*,
+    size_t) helper to replace currentTimestamp()'s static-String-by-
+    const-ref pattern, a String-to-stack-buffer rewrite of
+    buildNearbyApSummary() (capped at 5 entries per congestion-scan
+    interval, nowhere near the per-CSV-row frequency the earlier snprintf
+    conversions targeted), and the Mode 3 Help screen's per-session
+    uptime % vs. the separate Report tool's own log-derived uptime % --
+    two intentionally different numbers for two different questions, not
+    a bug to reconcile.
 */
 
 #include <SPI.h>
@@ -563,7 +610,7 @@ struct Mode3EventEntry;
 // to exist this early, before any function, not just before the struct that
 // happens to follow it.
 enum ModeEntryResult {
-  MODE_ENTRY_RUNNING,       // a real mode is running, OR pickAndLoadFloorPlan() hit one of its own non-recursive error returns (no floor plans found, JPEG decode failed, etc.) -- either way, stop the selection loop and let loop() dispatch app.currentMode as normal
+  MODE_ENTRY_RUNNING,       // a real mode is running, including Mode 1 right after pickAndLoadFloorPlan() loads a floor plan successfully -- stop the selection loop and let loop() dispatch app.currentMode as normal. (Build 9b follow-up: pickAndLoadFloorPlan()'s own failure returns -- no floor plan found, JPEG header/decode/PSRAM failures -- used to return this too, which left imgBuffer null and no running mode to dispatch to; they now return MODE_ENTRY_BACK_TO_MENU instead, same as "no SD card", so there's always a real mode or a menu on the other end of this.)
   MODE_ENTRY_BACK_TO_MENU,  // show the mode menu again
 };
 
@@ -1398,6 +1445,16 @@ void deriveCsvFilename() {
 // its own variable immediately or interpolates it straight into a larger
 // expression; nothing anywhere holds onto a reference to this buffer
 // across calls, so the next call overwriting it in place is fine.
+// Flagged again in review as worth eventually replacing with a
+// formatTimestamp(char*, size_t) helper instead -- that would remove the
+// static-String-by-const-ref hazard entirely (a future call site that DID
+// hold onto the reference across another call would otherwise just get
+// silently stale/wrong data, not a compile error or a crash) and make the
+// "don't hold onto this" contract obvious from the signature rather than
+// from this comment. Left as-is for this pass: every current call site
+// has been re-checked and does follow the contract, so this is a
+// maintainability improvement for next time someone adds a call site, not
+// a bug fix for an existing one.
 const String &currentTimestamp() {
   static String ts;
   if (app.rtcAvailable) {
@@ -2071,7 +2128,15 @@ ModeEntryResult pickAndLoadFloorPlan() {
     tft.fillScreen(ILI9341_BLACK);
     tft.setCursor(5, 5);
     tft.println("No floor plan available");
-    return MODE_ENTRY_RUNNING;
+    // Build 9b follow-up: used to return MODE_ENTRY_RUNNING here, which
+    // left imgBuffer still null and dropped straight into mode1Loop() --
+    // whose very first line is "if (imgBuffer == nullptr) return;", so
+    // every subsequent frame bailed out before it ever read BTN_HELP or
+    // BTN_GREEN. With nothing loaded there was no way back to the picker
+    // short of a power cycle. Back to the mode menu instead, same as the
+    // "no SD card" case just above.
+    delay(3000);
+    return MODE_ENTRY_BACK_TO_MENU;
   }
   strncpy(FLOORPLAN_FILE, floorplanNames[chosen], sizeof(FLOORPLAN_FILE));
   FLOORPLAN_FILE[sizeof(FLOORPLAN_FILE) - 1] = '\0';
@@ -2093,7 +2158,12 @@ ModeEntryResult pickAndLoadFloorPlan() {
     Serial.print("Could not read JPEG header, code: ");
     Serial.println(r);
     tft.println("JPEG header read failed");
-    return MODE_ENTRY_RUNNING;
+    // Build 9b follow-up: same mode1Loop() trap as the "no floor plan
+    // selected" case above -- imgBuffer is still null here, so this has
+    // to send the user back to the mode menu, not leave them stuck in a
+    // mode1Loop() that returns before reading any button.
+    delay(3000);
+    return MODE_ENTRY_BACK_TO_MENU;
   }
   Serial.print("JPEG native size: ");
   Serial.print(jpgW);
@@ -2112,7 +2182,10 @@ ModeEntryResult pickAndLoadFloorPlan() {
   if (imgBuffer == nullptr) {
     Serial.println("PSRAM allocation FAILED - image too large for available PSRAM");
     tft.println("PSRAM alloc failed");
-    return MODE_ENTRY_RUNNING;
+    // Build 9b follow-up: same mode1Loop() trap -- back to the mode menu
+    // rather than MODE_ENTRY_RUNNING with no buffer to actually run with.
+    delay(3000);
+    return MODE_ENTRY_BACK_TO_MENU;
   }
   Serial.println("PSRAM buffer allocated OK");
 
@@ -2131,7 +2204,10 @@ ModeEntryResult pickAndLoadFloorPlan() {
     tft.println(decodeResult);
     free(imgBuffer);
     imgBuffer = nullptr;
-    return MODE_ENTRY_RUNNING;
+    // Build 9b follow-up: same mode1Loop() trap -- imgBuffer is freed and
+    // null again right above, so this has to go back to the mode menu too.
+    delay(3000);
+    return MODE_ENTRY_BACK_TO_MENU;
   }
   Serial.print("Full-res decode into PSRAM took ");
   Serial.print(elapsed);
@@ -2678,6 +2754,19 @@ void showHelpScreen(int mode) {
     unsigned long elapsedTotal = now - mode3MonitorStartMs;
     unsigned long connectedSoFar = mode3ConnectedAccumMs;
     if (app.mode3State == MODE3_CONNECTED) connectedSoFar += now - mode3LastStateChangeMs;
+    // Build 9b follow-up: flagged in review as potentially not matching the
+    // uptime % the Report tool shows for the same log -- it does not,
+    // by definition, not by bug: this is connected-time / elapsed-time
+    // since mode3MonitorStartMs (this boot's Mode 3 session only, reset on
+    // every power-on/mode re-entry), read live off millis() counters that
+    // never touch the CSV. The Report tool computes its own uptime % from
+    // the CSV's CONNECTED/DISCONNECTED rows after the fact, over whatever
+    // span of the log it's looking at -- which can span multiple boots/days
+    // and won't agree with this screen's single-session figure. Left as
+    // two intentionally different numbers for two different questions
+    // ("how's this session going" vs. "how's the log overall") rather than
+    // reconciled into one, since picking a single definition is a product
+    // decision, not a bugfix.
     float uptimePct = (elapsedTotal > 0) ? (100.0f * connectedSoFar / elapsedTotal) : 0.0f;
 
     tft.setTextColor(ILI9341_CYAN);
@@ -3533,6 +3622,35 @@ void updatePiezo(int band, bool notFound, int avgRssi) {
   }
 }
 
+// Build 9b follow-up: the RSSI history average (see checkAmbientScan()
+// below) already smooths out a single noisy sample, but an average
+// sitting right on RSSI_GREEN_THRESHOLD or RSSI_AMBER_THRESHOLD can still
+// tip back and forth across the line scan to scan, flipping the traffic
+// light (and the piezo tone it drives) every few seconds for no real
+// change in signal. This adds a small margin on whichever side of a
+// boundary the CURRENT band already sits on: once green, avgRssi has to
+// drop BAND_HYSTERESIS_DB below the plain threshold (not just below it)
+// to leave; once red, it has to climb BAND_HYSTERESIS_DB above the amber
+// threshold to leave. previousBand < 0 (nothing drawn yet, see
+// lastDisplayedBand's own comment) has no prior band to hold onto, so
+// that case falls back to the plain thresholds.
+const int BAND_HYSTERESIS_DB = 3;
+
+int bandWithHysteresis(int avgRssi, int previousBand) {
+  if (previousBand < 0) {
+    if (avgRssi >= RSSI_GREEN_THRESHOLD) return 0;
+    if (avgRssi >= RSSI_AMBER_THRESHOLD) return 1;
+    return 2;
+  }
+  int greenEdge = (previousBand == 0) ? (RSSI_GREEN_THRESHOLD - BAND_HYSTERESIS_DB)
+                                       : (RSSI_GREEN_THRESHOLD + BAND_HYSTERESIS_DB);
+  int amberEdge = (previousBand == 2) ? (RSSI_AMBER_THRESHOLD + BAND_HYSTERESIS_DB)
+                                       : (RSSI_AMBER_THRESHOLD - BAND_HYSTERESIS_DB);
+  if (avgRssi >= greenEdge) return 0;
+  if (avgRssi >= amberEdge) return 1;
+  return 2;
+}
+
 // Called once per loop() iteration in Mode 2. No-op unless a scan is in
 // flight. Mirrors checkPendingScan() (Mode 1) but drives the traffic
 // light / piezo / walk CSV instead of a floor-plan dot.
@@ -3587,10 +3705,7 @@ void checkAmbientScan() {
   int avgRssi = sum / rssiHistoryCount;
 
   bool notFound = (rssi == RSSI_NOT_FOUND);   // this scan only, for the Serial line below
-  int band;   // 0 = green, 1 = amber, 2 = red
-  if (avgRssi >= RSSI_GREEN_THRESHOLD) band = 0;
-  else if (avgRssi >= RSSI_AMBER_THRESHOLD) band = 1;
-  else band = 2;
+  int band = bandWithHysteresis(avgRssi, lastDisplayedBand);   // 0 = green, 1 = amber, 2 = red
 
   // One shared "not found" verdict, used for the traffic light, the
   // piezo AND the CSV recommendation — a single dropout gets smoothed
@@ -3965,16 +4080,34 @@ void handleFileListPage() {
   fileServer.sendContent("");   // terminates the chunked response
 }
 
+// Build 9b follow-up: filenames come from the SD card / internal flash
+// directory listing, not from an HTTP request, so this isn't closing an
+// attacker-reachable hole -- but it keeps this page consistent with the
+// rest of the file server's hardening, and a stray "&"/"<"/'"'/"'" in a
+// filename (copied from elsewhere, or just a device renamed by hand)
+// would otherwise either break this page's HTML or break the onsubmit
+// confirm() string below.
+String htmlEscapeFilename(const String &name) {
+  String escaped = name;
+  escaped.replace("&", "&amp;");   // must run first -- escaping any entity below writes its own "&"
+  escaped.replace("<", "&lt;");
+  escaped.replace(">", "&gt;");
+  escaped.replace("\"", "&quot;");
+  escaped.replace("'", "&#39;");
+  return escaped;
+}
+
 // Build 7.2: one file's <li> row -- the download link plus a small inline
 // Delete form (POST, with a JS confirm() so a stray tap/click can't wipe
 // a log by accident). A bare <a href="/delete?..."> would also let a
 // browser's link-prefetching or a crawler trigger the delete just by
 // visiting the page, which a <form method="POST"> avoids.
 String fileListRowHtml(const String &name, size_t sizeBytes, const char *fsArg) {
-  String row = "<li><a href=\"/download?fs=" + String(fsArg) + "&file=" + name + "\">" + name + "</a> (" + String((unsigned long)sizeBytes) + " bytes) ";
-  row += "<form method=\"POST\" action=\"/delete\" style=\"display:inline\" onsubmit=\"return confirm('Delete " + name + "? This cannot be undone.');\">";
+  String safeName = htmlEscapeFilename(name);
+  String row = "<li><a href=\"/download?fs=" + String(fsArg) + "&file=" + safeName + "\">" + safeName + "</a> (" + String((unsigned long)sizeBytes) + " bytes) ";
+  row += "<form method=\"POST\" action=\"/delete\" style=\"display:inline\" onsubmit=\"return confirm('Delete " + safeName + "? This cannot be undone.');\">";
   row += "<input type=\"hidden\" name=\"fs\" value=\"" + String(fsArg) + "\">";
-  row += "<input type=\"hidden\" name=\"file\" value=\"" + name + "\">";
+  row += "<input type=\"hidden\" name=\"file\" value=\"" + safeName + "\">";
   row += "<button type=\"submit\">Delete</button>";
   row += "</form></li>";
   return row;
@@ -4360,14 +4493,27 @@ bool isSiblingRadio(int i, const uint8_t *myBssid) {
 // scan would get miscounted as a "competing" network on its own channel.
 // Build 7.6: also excludes sibling BSSIDs (see isSiblingRadio() above) so
 // a single AP broadcasting several SSIDs isn't counted several times.
-int countMode3NearbyApsOnChannel(int n, int targetChannel, const uint8_t *myBssid) {
+// Build 9b follow-up: siblingsExcludedOut (no default -- see this file's
+// other no-default-argument comments re: Arduino's auto-prototype
+// generator) hands back how many scan entries got filtered out as sibling
+// BSSIDs on THIS channel specifically, purely for diagnostics -- a
+// mis-set SIBLING_RADIO_MATCH_OCTETS (too loose) would quietly excuse
+// genuinely separate APs from the congestion count, and this is the one
+// place that can surface it without re-deriving the count by hand from a
+// NEARBY_APS log row.
+int countMode3NearbyApsOnChannel(int n, int targetChannel, const uint8_t *myBssid, int *siblingsExcludedOut) {
+  if (siblingsExcludedOut) *siblingsExcludedOut = 0;
   if (targetChannel <= 0) return 0;
   String mySSID = WiFi.SSID();
   int count = 0;
   for (int i = 0; i < n; i++) {
     if (WiFi.SSID(i) == mySSID) continue;
-    if (isSiblingRadio(i, myBssid)) continue;
-    if (WiFi.channel(i) == targetChannel && WiFi.RSSI(i) > -80) count++;
+    if (WiFi.channel(i) != targetChannel) continue;
+    if (isSiblingRadio(i, myBssid)) {
+      if (siblingsExcludedOut) (*siblingsExcludedOut)++;
+      continue;
+    }
+    if (WiFi.RSSI(i) > -80) count++;
   }
   return count;
 }
@@ -4388,7 +4534,11 @@ String buildInterferenceNote(int lastRssi, int nearbyApCount) {
     // interference" as if it were the diagnosis; a plain WiFi scan can't
     // actually see 2.4GHz non-WiFi sources (or most router-side/client
     // quirks) at all, so this is one candidate among several, not a verdict.
-    return "Disconnect occurred despite strong signal and low detected Wi-Fi congestion. Possible causes include router-side issues, client/AP compatibility, or non-Wi-Fi interference.";
+    // Build 9b follow-up: lastRssi (mode3LastKnownRssi) is only refreshed
+    // every MODE3_SAMPLE_INTERVAL_MS (30s) while connected, not at the
+    // instant of disconnect -- "strong signal" here can be describing a
+    // reading up to ~30s stale, so that's called out rather than implied.
+    return "Disconnect occurred despite strong signal and low detected Wi-Fi congestion (signal reading may be up to ~30s stale -- taken from the last periodic sample, not the moment of disconnect). Possible causes include router-side issues, client/AP compatibility, or non-Wi-Fi interference.";
   }
   return "";
 }
@@ -4442,6 +4592,15 @@ void syncRtcFromNtp() {
 // above) are excluded here too -- otherwise a NEARBY_APS row would still
 // list an AP's own other SSIDs as if they were separate neighbors, even
 // after the count itself was fixed.
+// Flagged in review as a String(ssid) + "+=" accumulation (every WiFi.SSID()
+// result here is already a fresh String, and "out" grows with "+=" below)
+// -- a stack-buffer-plus-snprintf rewrite, like writeCsvField()'s callers
+// got, would remove that churn. Not done this pass: MAX_LOGGED caps this
+// at 5 short entries per completed scan (every MODE3_CONGESTION_CHECK_INTERVAL_MS),
+// nowhere near the per-CSV-row frequency the earlier snprintf conversions
+// targeted, so there's no heap-fragmentation symptom to fix today -- worth
+// revisiting only if checkMode3HeapHealth() ever actually flags trouble on
+// a long-running unit.
 String buildNearbyApSummary(int n, int targetChannel, const String &mySSID, const uint8_t *myBssid) {
   if (targetChannel <= 0) return "";
   const int MAX_LOGGED = 5;
@@ -4609,13 +4768,16 @@ void checkMode3CongestionScan() {
     uint8_t myBssid[6];
     memcpy(myBssid, WiFi.BSSID(), 6);
     mode3CongestionChannel = channel;
-    mode3NearbyApCount = countMode3NearbyApsOnChannel(n, channel, myBssid);
+    int siblingsExcluded = 0;
+    mode3NearbyApCount = countMode3NearbyApsOnChannel(n, channel, myBssid, &siblingsExcluded);
     mode3NearbyApSummary = buildNearbyApSummary(n, channel, WiFi.SSID(), myBssid);
     Serial.print("Mode 3: congestion check — channel ");
     Serial.print(channel);
     Serial.print(", ");
     Serial.print(mode3NearbyApCount);
-    Serial.println(" competing network(s) on it (sibling SSIDs on our own AP excluded)");
+    Serial.print(" competing network(s) on it, ");
+    Serial.print(siblingsExcluded);
+    Serial.println(" sibling BSSID(s) on this channel excluded");
     // Build 7 item 4: its own row, logged once per completed scan (every
     // MODE3_CONGESTION_CHECK_INTERVAL_MS while connected) rather than on
     // every SAMPLE row, so detailed per-neighbor data doesn't bloat the
@@ -4780,7 +4942,16 @@ void mode3Loop() {
       const char *surveyNote = entry.duringChannelSurvey
         ? " (coincided with a channel-survey scan -- may be the scan itself briefly leaving the channel, not a genuine AP-side drop)"
         : "";
-      char noteBuf[400];
+      // Build 9b follow-up: 400 -> 576. Worst case (longest reason label +
+      // the full interference note, now including its stale-reading
+      // caveat + the full channel-survey note, all at once) comes out to
+      // ~488 bytes, so 400 wasn't actually overflowing -- snprintf just
+      // truncates safely rather than overflowing either way -- but the
+      // margin was thin enough (~20 bytes against hand-counted string
+      // literals) that the next wording tweak to either note could close
+      // it for real. 576 leaves comfortable room without re-counting by
+      // hand every time one of those literals changes.
+      char noteBuf[576];
       snprintf(noteBuf, sizeof(noteBuf), "reason=%d (%s)%s%s%s",
                (int)entry.disconnectReason, reasonLabel,
                interferenceNote.length() > 0 ? " " : "", interferenceNote.c_str(),
