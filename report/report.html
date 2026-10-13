@@ -873,6 +873,7 @@ function renderMonitor(monitor){
     const pillClass = r.event.includes("CONNECTED") && !r.event.includes("DIS") ? "good"
                      : r.event === "DISCONNECTED" ? "warn"
                      : r.event === "CONNECTION_LOST" ? "bad"
+                     : r.event === "STICKY_CLIENT" ? "warn"
                      : "info";
     let timeLabel = relative ? "+" + Math.round(r.t.ms/1000) + "s" : new Date(r.t.ms).toLocaleString();
     if (relative && multiSession) timeLabel += ` (session ${r.sessionIndex+1})`;
@@ -1391,6 +1392,12 @@ function renderConclusion(){
       verdicts.push("warn");
       bullets.push(`${missedEventsRows.length} MISSED_EVENTS row${missedEventsRows.length===1?"":"s"} ${missedEventsRows.length===1?"was":"were"} logged — the device's internal event queue filled up at least once, so the uptime and disconnect figures above may be missing some transitions from that gap.`);
     }
+    const stickyRows = rows.filter(r=>r.event==="STICKY_CLIENT");
+    if (stickyRows.length){
+      verdicts.push("warn");
+      const latestSticky = stickyRows[stickyRows.length-1];
+      bullets.push(`<strong>Sticky-client behaviour</strong> flagged ${stickyRows.length} time${stickyRows.length===1?"":"s"}: this device's own WiFi stayed on a weaker AP while a stronger sibling AP on the same network was in range for several checks in a row. Most recent: ${escapeHtml(latestSticky.recommendation || "")} This reflects the ESP32's own unassisted roaming behaviour, not necessarily how a phone or laptop with smarter roaming logic would behave on the same network.`);
+    }
     if (!bullets.length){
       bullets.push("Monitor log loaded, but didn't contain enough timestamped rows to summarize.");
     }
@@ -1578,6 +1585,7 @@ function loadExample(){
 12,SD,2026-10-05 09:40:00,SAMPLE,-74,Signal fair,TIMEOUT
 13,SD,2026-10-05 09:42:00,MISSED_EVENTS,1,1 connection event(s) were dropped,
 14,SD,2026-10-05 09:45:00,SAMPLE,-59,Signal good,19
+15,SD,2026-10-05 09:50:00,STICKY_CLIENT,-74,"Staying on a -74 dBm AP (channel 1) while a sibling AP on the same network measured -52 dBm (channel 6) -- 22 dB stronger, for 2 consecutive checks (~10 min). This is this device's own WiFi stack not roaming despite a stronger sibling AP being in range -- it reflects the ESP32's bare roaming behaviour, not necessarily what a phone or laptop with smarter (802.11k/v/r or vendor-assisted) roaming would do on the same network.",
 `;
   const walkCSV = `sequence,storage,event,zone,timestamp,rssi_dbm,avg_rssi_dbm,recommendation
 1,SD,SAMPLE,1,2026-10-05 10:00:00,-50,-51,Good
