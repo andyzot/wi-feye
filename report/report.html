@@ -288,12 +288,12 @@ footer{margin-top:28px; color:var(--muted); font-size:12px; text-align:center}
        loaded, so this never needs to be rebuilt in JS the way a
        per-survey-scaled legend would. -->
   <div class="heatLegend" id="heatLegend" hidden>
-    <span class="chip"><span class="sw" style="background:rgb(60,30,90)"></span>&le;-90 dBm very poor</span>
-    <span class="chip"><span class="sw" style="background:rgb(200,60,60)"></span>-80 dBm poor</span>
-    <span class="chip"><span class="sw" style="background:rgb(230,140,40)"></span>-72 dBm marginal</span>
-    <span class="chip"><span class="sw" style="background:rgb(230,210,60)"></span>-65 dBm fair</span>
-    <span class="chip"><span class="sw" style="background:rgb(140,200,70)"></span>-58 dBm good</span>
-    <span class="chip"><span class="sw" style="background:rgb(40,180,90)"></span>&ge;-50 dBm very good</span>
+    <span class="chip"><span class="sw" style="background:rgb(142,36,170)"></span>&le;-90 dBm very poor</span>
+    <span class="chip"><span class="sw" style="background:rgb(230,40,40)"></span>-80 dBm poor</span>
+    <span class="chip"><span class="sw" style="background:rgb(255,130,0)"></span>-72 dBm marginal</span>
+    <span class="chip"><span class="sw" style="background:rgb(255,210,0)"></span>-65 dBm fair</span>
+    <span class="chip"><span class="sw" style="background:rgb(170,230,40)"></span>-58 dBm good</span>
+    <span class="chip"><span class="sw" style="background:rgb(20,190,90)"></span>&ge;-50 dBm very good</span>
   </div>
   <p id="heatmapNote" style="font-size:12px;color:var(--muted);margin:8px 0 0" hidden></p>
 </div>
@@ -587,14 +587,36 @@ function isValidSurveyPoint(r){
    (see drawHeatmap) -- quantizing only the COLOR, the same idea as
    elevation contour lines, is what produces the hard edges; the
    interpolation itself stays physically reasonable (see idwValue's
-   power at the call site). ---------- */
+   power at the call site).
+
+   Colors re-picked for saturation/brightness (confirmed against actual
+   pixel samples the user cropped from both this report's own render and
+   the reference image: the reference's colors sit near-maximally
+   saturated and fully opaque, ours came out muted both because these
+   RGB values themselves were less vivid AND because of the canvas alpha
+   below -- see that comment for the second half of this fix). Checked
+   with the dataviz skill's validate_palette.js (categorical six-check,
+   which is a conservative stand-in here -- this is really a fixed
+   "status" scale per that skill's taxonomy, reserved meaning,
+   always paired with a text label in the legend/tier-breakdown, not a
+   series-identity palette): even at this saturation, the fair/good
+   pair (bright yellow next to bright yellow-green) can't clear the
+   normal-vision separation floor -- any two highly-saturated hues that
+   close on the hue wheel collapse together under red-green color
+   vision deficiency almost regardless of exact shade, which is a known
+   limitation of "rainbow" style scales in general, the reference image
+   included (its own adjacent green swatches measured just as close).
+   Mitigated the only way available without abandoning the vivid look
+   the user asked for: every tier is paired with a text label, both in
+   the static legend and in the per-tap tier-breakdown sentence below,
+   so color is never the only way to tell two tiers apart. ---------- */
 const HEAT_STOPS = [
-  [-90, [60, 30, 90],   "very poor"],
-  [-80, [200, 60, 60],  "poor"],
-  [-72, [230, 140, 40], "marginal"],
-  [-65, [230, 210, 60], "fair"],
-  [-58, [140, 200, 70], "good"],
-  [-50, [40, 180, 90],  "very good"],
+  [-90, [142, 36, 170], "very poor"],
+  [-80, [230, 40, 40],  "poor"],
+  [-72, [255, 130, 0],  "marginal"],
+  [-65, [255, 210, 0],  "fair"],
+  [-58, [170, 230, 40], "good"],
+  [-50, [20, 190, 90],  "very good"],
 ];
 // Nearest named tier to a given dBm value -- returns the full
 // [dbm, rgb, label] entry, not just a color, so callers (the legend
@@ -1599,7 +1621,15 @@ function drawHeatmap(canvas, samples, dispW, dispH){
       const v = idwValue(xPct, yPct, samples, 3);
       const [r,g,b] = rssiToRGB(v);
       const idx = (gy*GW + gx) * 4;
-      data.data[idx] = r; data.data[idx+1] = g; data.data[idx+2] = b; data.data[idx+3] = Math.round(0.72*255);
+      // 0.94, not fully 1.0: raised from an earlier 0.72 specifically
+      // because that alpha, composited over the page's light surface,
+      // was diluting every tier color toward white -- confirmed by
+      // sampling actual rendered pixels against the reference image's
+      // (fully opaque-looking) colors. Left just short of fully opaque
+      // so the floor-plan image underneath (walls, room labels) stays
+      // faintly legible through the fill rather than being hidden
+      // completely; a true 1.0 would erase it.
+      data.data[idx] = r; data.data[idx+1] = g; data.data[idx+2] = b; data.data[idx+3] = Math.round(0.94*255);
     }
   }
   sctx.putImageData(data, 0, 0);
