@@ -804,6 +804,12 @@ const int BAND_H = SCREEN_H / 3;                // 80 — R / - / + each get a f
 
 // Hit-test extends a little left of the drawn column, and to the true
 // top/bottom/right screen edges, so an edge-clamped touch is still caught.
+// Review note (Build 9b follow-up): this also means a tap landing just
+// left of the drawn toolbar edge -- within mapTouch()'s TOUCH_MARGIN
+// extrapolation zone, see its comment -- activates zoom/pan rather than
+// the image underneath it. Believed intentional (it's what makes the
+// zoom column reachable from a slightly-off edge tap at all), just
+// documented here since it wasn't written down anywhere before.
 const int ZOOM_HIT_LEFT = TOOLBAR_X - 4;   // 262
 
 // --- Image buffer (allocated in PSRAM once we know the JPEG's size) ---
@@ -992,11 +998,16 @@ unsigned long mode3LastCongestionCheckMs = 0;
 // toggled from the Diagnostics screen (More menu). Added so an A/B
 // comparison of Mode 3's disconnect rate with/without this scan running
 // can be done in one long sitting (toggle it, keep monitoring) rather than
-// needing two separate reflashes. Defaults to enabled (true) -- unchanged
-// behavior unless someone deliberately turns it off. Not persisted across
-// a reboot: it's meant for a deliberate same-session comparison, not a
-// permanent setting, so it resets to enabled every boot.
-bool mode3CongestionScanEnabled = true;
+// needing two separate reflashes. Not persisted across a reboot: it's
+// meant for a deliberate same-session comparison, not a permanent
+// setting, so it resets to the same default every boot.
+// Build 9b follow-up: default flipped to disabled (false). Mode 3's whole
+// purpose is catching intermittent drops, and this scan takes the radio
+// off-channel every 5 minutes to run it -- a self-inflicted source of the
+// very thing it's meant to diagnose. Still a one-button toggle on the
+// Diagnostics screen for anyone who wants the congestion/nearby-AP data
+// and is willing to accept that trade-off.
+bool mode3CongestionScanEnabled = false;
 int mode3NearbyApCount = 0;
 int mode3CongestionChannel = -1;
 int mode3RecommendedChannel = 0;   // Build 7.1: quietest of channels 1/6/11 by visible-AP count, set by buildChannelSurvey() each completed scan; 0 until the first scan completes
@@ -1281,15 +1292,30 @@ void deriveCsvFilename() {
 // relative fallback ("T+123s") so a reading is never silently mistaken for
 // a real timestamp. Used by every CSV logging function in place of the old
 // millis()/1000 seconds-since-boot value.
-String currentTimestamp() {
+// Build 9b follow-up: this is called on every CSV row (plus twice per NTP
+// sync), and used to return a freshly-constructed String each time -- a
+// heap allocation (and, on the next call, a deallocation) every call,
+// exactly the kind of churn checkMode3HeapHealth() exists to watch for.
+// Reuses a single static String instead, and returns it by const
+// reference rather than by value so there's no extra copy-on-return
+// either -- safe because every call site either copies the result into
+// its own variable immediately or interpolates it straight into a larger
+// expression; nothing anywhere holds onto a reference to this buffer
+// across calls, so the next call overwriting it in place is fine.
+const String &currentTimestamp() {
+  static String ts;
   if (app.rtcAvailable) {
     DateTime now = rtc.now();
     char buf[20];
     snprintf(buf, sizeof(buf), "%04d-%02d-%02d %02d:%02d:%02d",
              now.year(), now.month(), now.day(), now.hour(), now.minute(), now.second());
-    return String(buf);
+    ts = buf;
+  } else {
+    ts = "T+";
+    ts += String(millis() / 1000);
+    ts += "s";
   }
-  return "T+" + String(millis() / 1000) + "s";
+  return ts;
 }
 
 // Appends one line to CSV_FILE, writing a header first if the file is new.
@@ -2735,9 +2761,12 @@ void drawDiagnosticsScreenContents() {
 
   // Build 9b: shows and lets you flip the congestion-scan A/B toggle --
   // see mode3CongestionScanEnabled above (gates the scan in mode3Loop()).
+  // Build 9b follow-up: default is now OFF (see mode3CongestionScanEnabled's
+  // comment) -- "(A/B test)" moved onto the ON label since turning it on is
+  // now the deliberate, non-default choice.
   tft.setCursor(10, y);
   tft.print("Congestion scan: ");
-  tft.println(mode3CongestionScanEnabled ? "ON" : "OFF (A/B test)");
+  tft.println(mode3CongestionScanEnabled ? "ON (A/B test)" : "OFF");
   y += lineH;
 
   // A dropped-sample/sequence-gap indicator was optional per the spec --
@@ -4139,14 +4168,21 @@ void forgetMode3NetworkAndRestart() {
 // deployment has every physical radio broadcasting several SSIDs at once
 // (e.g. CFG_Team/CFG_Guest/CFG_RZ/Zorba/Major-Clks all sharing one base
 // MAC, differing only in the last octet), which is normal, intentional AP
-// configuration, not real channel contention. Matches on the first 5
-// octets (vendor+device prefix) of the BSSID -- sibling radios from the
-// same hardware share those, differing only in the last byte.
+// configuration, not real channel contention. Matches on the first
+// SIBLING_RADIO_MATCH_OCTETS octets (vendor+device prefix) of the BSSID --
+// sibling radios from the same hardware share those, differing only in
+// the last byte. This is a property of THIS site's AP vendor/model, not a
+// Wi-Fi standard, so it's a tunable constant rather than a hardcoded
+// literal -- a deployment where sibling radios vary in an earlier octet
+// (some vendors do) would need this turned down without hunting through
+// the function body for the number to change.
+const int SIBLING_RADIO_MATCH_OCTETS = 5;
+
 bool isSiblingRadio(int i, const uint8_t *myBssid) {
   if (myBssid == nullptr) return false;
   uint8_t *bssid = WiFi.BSSID(i);
   if (bssid == nullptr) return false;
-  for (int o = 0; o < 5; o++) {
+  for (int o = 0; o < SIBLING_RADIO_MATCH_OCTETS; o++) {
     if (bssid[o] != myBssid[o]) return false;
   }
   return true;
@@ -4200,11 +4236,18 @@ String buildInterferenceNote(int lastRssi, int nearbyApCount) {
 // Build 2: attempts to sync the RTC from NTP. Called from mode3Loop()
 // (never from SysProvEvent() itself -- that runs on a separate FreeRTOS
 // task and blocking network calls there are unsafe) right after a fresh
-// connection. Bounded by a short timeout so an unreachable NTP server
-// can't hang mode3Loop() for long -- the RTC's own coin-cell backup is
-// the authoritative clock the rest of the time; this is just an
-// opportunistic correction whenever Mode 3 happens to be online. Logs in
-// UTC (no DST handling) for simplicity and consistency across sessions.
+// connection, and now (Build 9b follow-up) after that iteration's
+// event-queue drain rather than before it -- see the call site. Bounded
+// by a short timeout so an unreachable NTP server can't hang mode3Loop()
+// for long -- the RTC's own coin-cell backup is the authoritative clock
+// the rest of the time; this is just an opportunistic correction whenever
+// Mode 3 happens to be online. Build 9b follow-up: timeout cut from 5s to
+// 2s -- 5s of mode3Loop() not servicing the web server/event queue on
+// every fresh connection was longer than this opportunistic correction
+// is worth; NTP servers that answer at all normally answer in well under
+// 2s, so this mostly costs timeout time against servers that were never
+// going to answer anyway. Logs in UTC (no DST handling) for simplicity
+// and consistency across sessions.
 void syncRtcFromNtp() {
   if (!app.rtcAvailable) return;
   Serial.println("Mode 3: attempting NTP time sync...");
@@ -4215,7 +4258,7 @@ void syncRtcFromNtp() {
   String oldTimestamp = currentTimestamp();
   configTime(0, 0, "pool.ntp.org", "time.nist.gov");
   struct tm timeinfo;
-  if (getLocalTime(&timeinfo, 5000)) {
+  if (getLocalTime(&timeinfo, 2000)) {
     time_t epoch = mktime(&timeinfo);
     rtc.adjust(DateTime((uint32_t)epoch));
     Serial.println("Mode 3: RTC synced from NTP (UTC)");
@@ -4514,10 +4557,15 @@ void mode3Loop() {
   checkMode3CongestionScan();
   checkMode3HeapHealth();
 
-  if (mode3NeedsNtpSync) {
-    mode3NeedsNtpSync = false;
-    syncRtcFromNtp();
-  }
+  // Build 9b follow-up: syncRtcFromNtp() moved to AFTER the event-queue
+  // drain/overflow-report/grace-period-demotion block below (see its new
+  // location further down) -- it's bounded but still a blocking call
+  // (getLocalTime()'s timeout), and running it here, before the drain,
+  // meant every bit of connection-event bookkeeping below sat waiting on
+  // an NTP round-trip on every fresh connection. The queued events aren't
+  // time-sensitive to the NTP sync itself -- draining them first just
+  // means the housekeeping that matters for drop-detection isn't held
+  // hostage by a (normally fast, occasionally slow) network round-trip.
 
   if (mode3NeedsWebServerStart) {
     mode3NeedsWebServerStart = false;
@@ -4625,6 +4673,15 @@ void mode3Loop() {
     appendMonitorLogLine("CONNECTION_LOST", RSSI_NOT_FOUND,
                           "No reconnect within " + String(MODE3_RECONNECT_GRACE_MS / 1000) + "s of the disconnect -- treating as a sustained loss, not a brief drop.", "");
     refreshMode3Screen();
+  }
+
+  // Build 9b follow-up: syncRtcFromNtp() runs here now, after the
+  // event-queue drain/overflow-report/grace-period-demotion above --
+  // see the comment where mode3NeedsNtpSync used to be checked, earlier
+  // in this function.
+  if (mode3NeedsNtpSync) {
+    mode3NeedsNtpSync = false;
+    syncRtcFromNtp();
   }
 
   // --- Occasional channel-congestion check while connected (async, see
