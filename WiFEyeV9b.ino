@@ -465,6 +465,52 @@
     a burst of transitions during a queue-full moment leaves a visible
     trace in the CSV rather than a silent, unexplained gap in the
     drop-count/uptime bookkeeping.
+  - Build 9b follow-up: a further code review, in two passes.
+    First pass -- four fixes: (1) syncRtcFromNtp() (bounded by
+    getLocalTime()'s timeout) now runs AFTER mode3Loop()'s event-queue
+    drain/overflow-report/reconnect-grace-demotion instead of before it,
+    and that timeout is cut from 5s to 2s, so a slow/unreachable NTP
+    server no longer delays the web server and connection-event
+    bookkeeping on every fresh connection. (2) mode3CongestionScanEnabled
+    now defaults to false -- the periodic scan takes the radio
+    off-channel, a self-inflicted disconnect risk on a device whose job
+    is catching drops; still a one-button Diagnostics toggle. (3)
+    currentTimestamp() reuses a single static String, returned by const
+    reference, instead of allocating/freeing a new one on every CSV row.
+    (4) isSiblingRadio()'s hardcoded 5-octet BSSID match is now the named
+    SIBLING_RADIO_MATCH_OCTETS constant. Also documented the
+    ZOOM_HIT_LEFT/TOUCH_MARGIN edge-tap interaction.
+    Second pass -- three more: (5) Replaced csvEscape() (which always
+    returned a new String, even when a field needed no escaping at all)
+    with writeCsvField(), which writes straight to the file with no
+    allocation on that common path. buildRecommendation() and the
+    DISCONNECTED/CONNECTED event notes in mode3Loop() (previously built
+    via chains of String += concatenation) now build into a stack buffer
+    with snprintf instead; every CSV writer's bounded fields (sequence,
+    storage, timestamp, event, rssi, zone, avg_rssi) are now one snprintf
+    call each rather than several separate f.print()s, leaving only the
+    genuinely variable-length fields (recommendation, target_ssid, the
+    Mode 1 floorplan filename) going through writeCsvField(). (6)
+    enterMode()/pickAndLoadFloorPlan() used to recurse into each other
+    (enterMode(selectMode())) every time a picker's Green button, "no SD
+    card", "no networks found", or the More menu sent the user back to
+    the mode menu -- each bounce added a stack frame that was only
+    reclaimed once some mode actually started running, so repeatedly
+    backing out without ever landing on one could grow the stack without
+    bound. Split into enterModeOnce() (does the work, returns a plain
+    ModeEntryResult) and enterMode() (a loop, not a recursive call,
+    around it); pickAndLoadFloorPlan() returns the same enum instead of
+    calling back into enterMode()/selectMode() itself. (7) Mode 2's
+    countNearbyApsOnChannel() closes the exact-SSID-only gap flagged (and
+    deliberately left open) back in Build 7.6: it now excludes sibling
+    BSSIDs too, via the same isSiblingRadio() Mode 3 already used, keyed
+    off the target SSID's own BSSID from the current scan (bestRssiAndChannel()
+    now hands that back) since Mode 2 never associates and so has no
+    "connected" BSSID of its own to compare against. Also:
+    handleFileListPage() now streams its response row-by-row with
+    fileServer.sendContent() instead of building the whole page into one
+    String first, so it no longer has any reallocation risk on a card
+    with many files (replacing the earlier html.reserve(4096) mitigation).
 */
 
 #include <SPI.h>
@@ -596,6 +642,18 @@ enum Mode3ConnectionState {
   MODE3_RECONNECTING   // was connected, just disconnected; auto-reconnect gets a short grace window (MODE3_RECONNECT_GRACE_MS) before this is demoted to MODE3_OFFLINE and logged as a genuine sustained loss
 };
 
+// Build 9b follow-up: return value for enterModeOnce()/pickAndLoadFloorPlan()
+// -- see enterMode()'s own comment, much further down, for why these no
+// longer recurse into each other. Declared all the way up here, rather
+// than beside the functions that actually use it, for the same reason
+// Mode3EventEntry is forward-declared just above: Arduino's auto-generated
+// function prototypes are inserted near the top of the file, so any
+// custom type used in a function signature has to already exist by then.
+enum ModeEntryResult {
+  MODE_ENTRY_RUNNING,       // a real mode is running, OR pickAndLoadFloorPlan() hit one of its own non-recursive error returns (no floor plans found, JPEG decode failed, etc.) -- either way, stop the selection loop and let loop() dispatch app.currentMode as normal
+  MODE_ENTRY_BACK_TO_MENU,  // show the mode menu again
+};
+
 struct AppState {
   int currentMode = 0;              // 0 = not yet chosen; set once in setup() via selectMode()
   bool sdCardAvailable = false;
@@ -634,27 +692,57 @@ AppState app;
 // given row ended up on.
 unsigned long globalLogSequence = 0;
 
-// Build 9b: one reusable CSV-field escaping helper, applied to every
-// free-text field written into any of the CSV log files (recommendation
-// text, target SSID, floorplan filename) -- NOT the purely numeric/fixed-
-// enum columns (sequence, storage, rssi, timestamps, etc.), which can
-// never contain a comma and don't need it. Standard RFC4180-style rule:
-// if the field contains a comma, a double-quote, or a newline, wrap the
-// whole thing in double quotes and double up any quotes already inside
-// it. Left alone (no quotes added) when none of those characters are
-// present, so the vast majority of rows stay exactly as before -- only
-// the rare field that actually contains a comma (e.g. the congestion
-// recommendation text's "(N other nearby networks on it)" phrasing)
-// changes shape at all.
-String csvEscape(const String &field) {
+// Build 9b: applied to every free-text field written into any of the CSV
+// log files (recommendation text, target SSID, floorplan filename) --
+// NOT the purely numeric/fixed-enum columns (sequence, storage, rssi,
+// timestamps, etc.), which can never contain a comma and don't need it.
+// Standard RFC4180-style rule: if the field contains a comma, a
+// double-quote, or a newline, wrap the whole thing in double quotes and
+// double up any quotes already inside it. Left alone (no quotes added)
+// when none of those characters are present, so the vast majority of
+// rows stay exactly as before -- only the rare field that actually
+// contains a comma (e.g. the congestion recommendation text's "(N other
+// nearby networks on it)" phrasing) changes shape at all.
+//
+// Build 9b follow-up: this used to be csvEscape(), a function returning
+// a new String by value even on the (overwhelmingly common) no-escaping-
+// needed path -- a heap allocation on every recommendation/target_ssid/
+// floorplan field, on every row, for a value that usually passes through
+// completely unchanged. Replaced with this pair of overloads, called
+// directly at each write site instead of through an intermediate
+// f.print(csvEscape(...)): no allocation at all on the common path, and
+// only the (unavoidable, since the escaped text is genuinely different)
+// quoted copy on the rare path that actually needs it. `last` picks
+// f.println() (ends the row) vs. f.print()+comma (continues it), same
+// choice every call site used to make by hand around the old csvEscape().
+void writeCsvField(File &f, const String &field, bool last) {
   bool needsQuoting = field.indexOf(',') >= 0 || field.indexOf('"') >= 0 ||
                        field.indexOf('\n') >= 0 || field.indexOf('\r') >= 0;
   if (!needsQuoting) {
-    return field;
+    if (last) f.println(field);
+    else { f.print(field); f.print(','); }
+    return;
   }
   String escaped = field;
   escaped.replace("\"", "\"\"");
-  return "\"" + escaped + "\"";
+  f.print('"');
+  f.print(escaped);
+  if (last) f.println('"');
+  else f.print("\",");
+}
+
+// Overload for FLOORPLAN_FILE (a plain char[40], not a String) -- avoids
+// constructing a temporary String just to call the overload above, which
+// would reintroduce exactly the allocation this pair of functions exists
+// to avoid. Same rule, using C string functions instead of String's.
+void writeCsvField(File &f, const char *field, bool last) {
+  bool needsQuoting = strpbrk(field, ",\"\n\r") != nullptr;
+  if (!needsQuoting) {
+    if (last) f.println(field);
+    else { f.print(field); f.print(','); }
+    return;
+  }
+  writeCsvField(f, String(field), last);   // rare path -- a copy here is fine
 }
 
 // Confirmed touch calibration
@@ -1344,25 +1432,21 @@ void appendCsvLine(float xPercent, float yPercent, int rssi, float imgX, float i
   globalLogSequence++;
   f.print(globalLogSequence);
   f.print(",SD,");
-  f.print(csvEscape(FLOORPLAN_FILE));
-  f.print(",");
-  f.print(xPercent, 2);
-  f.print(",");
-  f.print(yPercent, 2);
-  f.print(",");
-  f.print(imgX, 1);
-  f.print(",");
-  f.print(imgY, 1);
-  f.print(",");
-  f.print(currentTimestamp());
-  f.print(",");
+  writeCsvField(f, FLOORPLAN_FILE, false);
+  // Build 9b follow-up: x_percent/y_percent/img_x/img_y/timestamp/rssi_dbm
+  // are all bounded (fixed-decimal floats, a timestamp capped at ~19
+  // chars, rssi a handful of digits or the literal NOT_FOUND) -- one
+  // snprintf into a stack buffer instead of six separate f.print() calls.
+  char buf[80];
   if (rssi == RSSI_NOT_FOUND) {
-    f.print("NOT_FOUND");
+    snprintf(buf, sizeof(buf), "%.2f,%.2f,%.1f,%.1f,%s,NOT_FOUND,",
+             xPercent, yPercent, imgX, imgY, currentTimestamp().c_str());
   } else {
-    f.print(rssi);
+    snprintf(buf, sizeof(buf), "%.2f,%.2f,%.1f,%.1f,%s,%d,",
+             xPercent, yPercent, imgX, imgY, currentTimestamp().c_str(), rssi);
   }
-  f.print(",");
-  f.println(csvEscape(activeTargetSsid));
+  f.print(buf);
+  writeCsvField(f, activeTargetSsid, true);
   f.close();
 
   Serial.print("Logged to ");
@@ -1910,10 +1994,19 @@ int selectTargetNetwork() {
 }
 
 // Shows the picker, loads whichever floor plan is chosen, and sets up the
-// view/PSRAM buffer for it. Called once from setup(), and again any time
-// the green button is pressed to switch to a different floor plan without
-// rebooting. Frees any previously-allocated PSRAM buffer first.
-void pickAndLoadFloorPlan() {
+// view/PSRAM buffer for it. Called once from enterMode(), and again any
+// time the green button is pressed inside Mode 1 to switch to a different
+// floor plan without rebooting. Frees any previously-allocated PSRAM
+// buffer first.
+// Build 9b follow-up: used to call enterMode(selectMode()) itself on the
+// "no SD card" and "green pressed, back to menu" paths -- each such call
+// added a stack frame that was never reclaimed until the device was
+// eventually reset, since the call chain only unwinds once some mode
+// actually starts running (see enterMode()'s comment for the full
+// reasoning). Returns a plain ModeEntryResult instead, so neither caller
+// (enterMode() below, or Mode 1's own Green-button handler) needs to
+// recurse to act on it.
+ModeEntryResult pickAndLoadFloorPlan() {
   // Mode 1 genuinely needs SD (the floor plan JPEGs live there) — unlike
   // Modes 2/3, there's no fallback that makes sense here. Give it one more
   // chance first in case a card's been inserted since boot (or since the
@@ -1936,8 +2029,7 @@ void pickAndLoadFloorPlan() {
     tft.setCursor(5, 50);
     tft.println("Mode 2 or 3 instead.");
     delay(3000);
-    enterMode(selectMode());
-    return;
+    return MODE_ENTRY_BACK_TO_MENU;
   }
 
   // Free the old image buffer (if any) before allocating a new one —
@@ -1963,8 +2055,7 @@ void pickAndLoadFloorPlan() {
     // Green pressed at the picker — back to the mode menu, not just a
     // re-shown picker.
     Serial.println("Returning to mode menu...");
-    enterMode(selectMode());
-    return;
+    return MODE_ENTRY_BACK_TO_MENU;
   }
 
   if (chosen < 0) {
@@ -1972,7 +2063,7 @@ void pickAndLoadFloorPlan() {
     tft.fillScreen(ILI9341_BLACK);
     tft.setCursor(5, 5);
     tft.println("No floor plan available");
-    return;
+    return MODE_ENTRY_RUNNING;
   }
   strncpy(FLOORPLAN_FILE, floorplanNames[chosen], sizeof(FLOORPLAN_FILE));
   FLOORPLAN_FILE[sizeof(FLOORPLAN_FILE) - 1] = '\0';
@@ -1994,7 +2085,7 @@ void pickAndLoadFloorPlan() {
     Serial.print("Could not read JPEG header, code: ");
     Serial.println(r);
     tft.println("JPEG header read failed");
-    return;
+    return MODE_ENTRY_RUNNING;
   }
   Serial.print("JPEG native size: ");
   Serial.print(jpgW);
@@ -2013,7 +2104,7 @@ void pickAndLoadFloorPlan() {
   if (imgBuffer == nullptr) {
     Serial.println("PSRAM allocation FAILED - image too large for available PSRAM");
     tft.println("PSRAM alloc failed");
-    return;
+    return MODE_ENTRY_RUNNING;
   }
   Serial.println("PSRAM buffer allocated OK");
 
@@ -2032,7 +2123,7 @@ void pickAndLoadFloorPlan() {
     tft.println(decodeResult);
     free(imgBuffer);
     imgBuffer = nullptr;
-    return;
+    return MODE_ENTRY_RUNNING;
   }
   Serial.print("Full-res decode into PSRAM took ");
   Serial.print(elapsed);
@@ -2052,6 +2143,7 @@ void pickAndLoadFloorPlan() {
   Serial.println("Yellow=undo, Blue=clear all, Green=back to floor plan list.");
 
   needsRedraw = true;
+  return MODE_ENTRY_RUNNING;
 }
 
 // Simple splash screen shown once at power-up, before "Starting up..." and
@@ -2427,7 +2519,14 @@ void mode1Loop() {
   if (digitalRead(BTN_GREEN) == LOW) {
     waitForRelease(BTN_GREEN);
     Serial.println("Returning to floor plan picker...");
-    pickAndLoadFloorPlan();
+    // Build 9b follow-up: pickAndLoadFloorPlan() no longer calls back into
+    // enterMode()/selectMode() itself on its own "back to mode menu" path
+    // (see its comment) -- this is the one call site that isn't already
+    // inside enterModeOnce(), so it's the one responsible for actually
+    // acting on that result.
+    if (pickAndLoadFloorPlan() == MODE_ENTRY_BACK_TO_MENU) {
+      enterMode(selectMode());
+    }
   }
 
   // --- Touch: on-screen zoom icons, drag to pan (no more tap-to-log) ---
@@ -3021,17 +3120,13 @@ int selectMode() {
   }
 }
 
-// Dispatches to whichever mode was chosen — shared by setup() and every
-// "back to mode menu" path so they all start that mode the same way.
-// Build 8: Modes 1/2 get an extra step first -- picking which network to
-// survey (see selectTargetNetwork() above) -- since they no longer only
-// ever look for the hardcoded TARGET_SSID. Deliberately placed here
-// rather than inside pickAndLoadFloorPlan() itself, since that function is
-// also called again by Mode 1's own Green button (switch floor plan,
-// same network); re-prompting for a network on every floor-plan switch
-// would be a needless extra tap for the common case of staying at one
-// site and only wanting a different plan.
-void enterMode(int mode) {
+// Does the work of entering ONE chosen mode -- the network picker for
+// Modes 1/2, then the mode itself -- and reports back whether that
+// actually started running or whether the caller should show the mode
+// menu again. Build 9b follow-up: split out of enterMode() so the retry
+// loop below can act on that result without recursing -- see enterMode()'s
+// own comment for why that matters.
+ModeEntryResult enterModeOnce(int mode) {
   app.currentMode = mode;
   if (mode == 1 || mode == 2) {
     int chosen = selectTargetNetwork();
@@ -3039,32 +3134,55 @@ void enterMode(int mode) {
       // Green pressed at the picker -- back to the mode menu, same
       // convention as the floor-plan and mode-select screens.
       Serial.println("Returning to mode menu...");
-      enterMode(selectMode());
-      return;
+      return MODE_ENTRY_BACK_TO_MENU;
     }
     if (chosen < 0) {
       // No networks found nearby -- nothing to survey either way, so
       // there's no point entering Mode 1/2 at all.
       Serial.println("No networks to survey — returning to mode menu...");
-      enterMode(selectMode());
-      return;
+      return MODE_ENTRY_BACK_TO_MENU;
     }
     activeTargetSsid = String(surveyNetworkNames[chosen]);
     Serial.print("Active target SSID for this session: ");
     Serial.println(activeTargetSsid);
   }
 
-  if (mode == 1) pickAndLoadFloorPlan();
-  else if (mode == 2) startMode2();
-  else if (mode == 3) startMode3();
-  else {
-    // "More" (Build 7 item 7) -- not a real running mode, so it never
-    // reaches loop()'s dispatcher (which only knows modes 1-3): this call
-    // is synchronous/blocking, same as pickAndLoadFloorPlan()'s own
-    // "green -> back to menu" recursion elsewhere in this file, and
-    // always lands back on a fresh mode pick afterward.
-    showMoreMenu();
-    enterMode(selectMode());
+  if (mode == 1) return pickAndLoadFloorPlan();
+  if (mode == 2) { startMode2(); return MODE_ENTRY_RUNNING; }
+  if (mode == 3) { startMode3(); return MODE_ENTRY_RUNNING; }
+
+  // "More" (Build 7 item 7) -- not a real running mode, so it never
+  // reaches loop()'s dispatcher (which only knows modes 1-3): this call
+  // is synchronous/blocking, and always lands back on the mode menu
+  // afterward.
+  showMoreMenu();
+  return MODE_ENTRY_BACK_TO_MENU;
+}
+
+// Dispatches to whichever mode was chosen — shared by setup() and every
+// "back to mode menu" path so they all start that mode the same way.
+// Build 8: Modes 1/2 get an extra step first -- picking which network to
+// survey (see selectTargetNetwork() above) -- since they no longer only
+// ever look for the hardcoded TARGET_SSID. Deliberately placed in
+// enterModeOnce() above rather than inside pickAndLoadFloorPlan() itself,
+// since that function is also called again by Mode 1's own Green button
+// (switch floor plan, same network); re-prompting for a network on every
+// floor-plan switch would be a needless extra tap for the common case of
+// staying at one site and only wanting a different plan.
+// Build 9b follow-up: this used to BE enterModeOnce()'s body, and called
+// itself -- enterMode(selectMode()) -- every time a picker's Green
+// button, "no SD card", "no networks found", or the More menu sent the
+// user back to the mode menu. Each such bounce added a stack frame that
+// was never reclaimed: the call chain only unwinds once some mode
+// actually starts running, so a user (or a stuck/bouncing button)
+// repeatedly backing out without ever landing on a running mode could
+// grow the stack without bound. Now a plain loop: every "back to the
+// menu" outcome is a return value, not a recursive call, so stack depth
+// here never exceeds one level no matter how many times this bounces.
+void enterMode(int firstMode) {
+  int mode = firstMode;
+  while (enterModeOnce(mode) == MODE_ENTRY_BACK_TO_MENU) {
+    mode = selectMode();
   }
 }
 
@@ -3100,15 +3218,23 @@ void startMode2() {
 // channel the target SSID was found on, needed for the congestion check
 // below. Kept separate from Mode 1's version rather than changing its
 // signature, so Mode 1's tested behavior is untouched.
-int bestRssiAndChannel(int n, int &channelOut) {
+// Build 9b follow-up: also returns the matching entry's BSSID via
+// bssidOut -- see countNearbyApsOnChannel()'s comment for why. No default
+// argument here, same reason recommendedChannel doesn't have one on
+// buildRecommendation() (see that Build 7.2 comment): Arduino's
+// auto-prototype generator can mishandle default arguments in a plain
+// .ino sketch, so every call site passes it explicitly instead.
+int bestRssiAndChannel(int n, int &channelOut, const uint8_t **bssidOut) {
   int bestRssi = RSSI_NOT_FOUND;
   channelOut = -1;
+  if (bssidOut) *bssidOut = nullptr;
   for (int i = 0; i < n; i++) {
     if (WiFi.SSID(i) == activeTargetSsid) {
       int rssi = WiFi.RSSI(i);
       if (bestRssi == RSSI_NOT_FOUND || rssi > bestRssi) {
         bestRssi = rssi;
         channelOut = WiFi.channel(i);
+        if (bssidOut) *bssidOut = WiFi.BSSID(i);
       }
     }
   }
@@ -3119,11 +3245,25 @@ int bestRssiAndChannel(int n, int &channelOut) {
 // signal strong enough to plausibly be competing for airtime. A rough
 // proxy for "is this channel crowded", using only data we already have
 // from the same scan — no extra hardware or scanning needed.
-int countNearbyApsOnChannel(int n, int targetChannel) {
+// Build 9b follow-up (closes the Build 7.6 "candidate for later" gap
+// noted in the changelog above, now that it has its own evidence): this
+// used to match on SSID alone, so a target AP broadcasting more than one
+// SSID from the same physical radio (the exact scenario Mode 3's
+// isSiblingRadio() was added for) had its OWN sibling SSIDs miscounted as
+// competing networks, inflating the congestion count on exactly the kind
+// of enterprise multi-SSID deployment that motivated isSiblingRadio() in
+// the first place. Mode 2 never associates (no WiFi.BSSID() of "my own"
+// connection to compare against, unlike Mode 3), but the target's BSSID
+// is still right there in this same scan -- bestRssiAndChannel() now
+// hands it over (targetBssid), so the same isSiblingRadio() exclusion
+// Mode 3 uses applies here too, just keyed off a scanned BSSID instead of
+// a connected one.
+int countNearbyApsOnChannel(int n, int targetChannel, const uint8_t *targetBssid) {
   if (targetChannel <= 0) return 0;
   int count = 0;
   for (int i = 0; i < n; i++) {
     if (WiFi.SSID(i) == activeTargetSsid) continue;
+    if (isSiblingRadio(i, targetBssid)) continue;
     if (WiFi.channel(i) == targetChannel && WiFi.RSSI(i) > -80) count++;
   }
   return count;
@@ -3151,32 +3291,44 @@ int countNearbyApsOnChannel(int n, int targetChannel) {
 // meant a report built from the log only ever saw "try switching channel"
 // repeated, with the actually-useful answer (switch to WHICH channel)
 // sitting unread in a separate row type.
+// Build 9b follow-up: previously built `rec` via a chain of String +=
+// concatenations, each one a potential buffer reallocation, called on
+// every SAMPLE in all three modes. Every piece here is bounded (channel
+// numbers are 1-13, nearbyApCount is a scan-result count that fits
+// comfortably in a couple of digits), so it's now one snprintf into a
+// stack buffer, with exactly one String constructed at the very end --
+// the recommendedChannel branch is the only part that still needs an
+// early, simpler return (the "not found"/no-congestion cases don't need
+// the buffer at all).
 String buildRecommendation(bool notFound, int avgRssi, int nearbyApCount, int channel, int recommendedChannel) {
-  String rec;
   if (notFound) {
-    rec = "Not detected here. Consider an access point or repeater nearby.";
-    return rec;
+    return "Not detected here. Consider an access point or repeater nearby.";
   }
 
+  const char *base;
   if (avgRssi >= RSSI_GREEN_THRESHOLD) {
-    rec = "Good signal. No changes needed.";
+    base = "Good signal. No changes needed.";
   } else if (avgRssi >= RSSI_AMBER_THRESHOLD) {
-    rec = "Usable but weak. Try moving closer to the router or reducing obstacles.";
+    base = "Usable but weak. Try moving closer to the router or reducing obstacles.";
   } else {
-    rec = "Poor signal. Consider a repeater/mesh node here, or relocating the router.";
+    base = "Poor signal. Consider a repeater/mesh node here, or relocating the router.";
   }
 
-  if (nearbyApCount >= 2) {
-    rec += " Channel " + String(channel) + " looks congested (" + String(nearbyApCount) +
-           " other nearby networks on it) — try switching channel";
-    if (recommendedChannel > 0 && recommendedChannel != channel) {
-      rec += " (channel " + String(recommendedChannel) + " currently recommended).";
-    } else {
-      rec += ".";
-    }
+  if (nearbyApCount < 2) {
+    return base;
   }
 
-  return rec;
+  char buf[256];
+  if (recommendedChannel > 0 && recommendedChannel != channel) {
+    snprintf(buf, sizeof(buf),
+             "%s Channel %d looks congested (%d other nearby networks on it) — try switching channel (channel %d currently recommended).",
+             base, channel, nearbyApCount, recommendedChannel);
+  } else {
+    snprintf(buf, sizeof(buf),
+             "%s Channel %d looks congested (%d other nearby networks on it) — try switching channel.",
+             base, channel, nearbyApCount);
+  }
+  return String(buf);
 }
 
 // Appends one reading to WALK_CSV_FILE, writing a header first if new.
@@ -3204,23 +3356,22 @@ void appendWalkCsvLineToFallback(const char *event, int zone, int rssi, int avgR
   globalLogSequence++;
   f.print(globalLogSequence);
   f.print(",FFAT,");
-  f.print(event);
-  f.print(",");
-  f.print(zone);
-  f.print(",");
-  f.print(currentTimestamp());
-  f.print(",");
+  // Build 9b follow-up: event/zone/timestamp/rssi_dbm/avg_rssi_dbm are all
+  // bounded (event is one of a handful of short firmware literals, zone
+  // and avgRssi are small ints, rssi is a handful of digits or the
+  // literal NOT_FOUND) -- one snprintf into a stack buffer instead of
+  // five separate f.print() calls. recommendation/target_ssid stay on
+  // their own through writeCsvField() -- they're the genuinely variable-
+  // length, escapable fields.
+  char buf[72];
   if (rssi == RSSI_NOT_FOUND) {
-    f.print("NOT_FOUND");
+    snprintf(buf, sizeof(buf), "%s,%d,%s,NOT_FOUND,%d,", event, zone, currentTimestamp().c_str(), avgRssi);
   } else {
-    f.print(rssi);
+    snprintf(buf, sizeof(buf), "%s,%d,%s,%d,%d,", event, zone, currentTimestamp().c_str(), rssi, avgRssi);
   }
-  f.print(",");
-  f.print(avgRssi);
-  f.print(",");
-  f.print(csvEscape(recommendation));
-  f.print(",");
-  f.println(csvEscape(activeTargetSsid));
+  f.print(buf);
+  writeCsvField(f, recommendation, false);
+  writeCsvField(f, activeTargetSsid, true);
   f.close();
   Serial.println("Mode 2: SD write failed (or no card) — line saved to internal flash fallback instead (/walk_survey_fallback.csv)");
 }
@@ -3266,23 +3417,18 @@ void appendWalkCsvLine(const char *event, int zone, int rssi, int avgRssi, const
   globalLogSequence++;
   f.print(globalLogSequence);
   f.print(",SD,");
-  f.print(event);
-  f.print(",");
-  f.print(zone);
-  f.print(",");
-  f.print(currentTimestamp());
-  f.print(",");
+  // Build 9b follow-up: see the matching comment in
+  // appendWalkCsvLineToFallback() -- same bounded-fields-in-one-buffer
+  // treatment here.
+  char buf[72];
   if (rssi == RSSI_NOT_FOUND) {
-    f.print("NOT_FOUND");
+    snprintf(buf, sizeof(buf), "%s,%d,%s,NOT_FOUND,%d,", event, zone, currentTimestamp().c_str(), avgRssi);
   } else {
-    f.print(rssi);
+    snprintf(buf, sizeof(buf), "%s,%d,%s,%d,%d,", event, zone, currentTimestamp().c_str(), rssi, avgRssi);
   }
-  f.print(",");
-  f.print(avgRssi);
-  f.print(",");
-  f.print(csvEscape(recommendation));
-  f.print(",");
-  f.println(csvEscape(activeTargetSsid));
+  f.print(buf);
+  writeCsvField(f, recommendation, false);
+  writeCsvField(f, activeTargetSsid, true);
   f.close();
 }
 
@@ -3412,8 +3558,9 @@ void checkAmbientScan() {
   Serial.println(" networks found");
 
   int channel;
-  int rssi = bestRssiAndChannel(n, channel);
-  int nearbyApCount = countNearbyApsOnChannel(n, channel);
+  const uint8_t *targetBssid;
+  int rssi = bestRssiAndChannel(n, channel, &targetBssid);
+  int nearbyApCount = countNearbyApsOnChannel(n, channel, targetBssid);
   WiFi.scanDelete();
   ambientScanPending = false;
 
@@ -3670,18 +3817,22 @@ void appendMonitorLogLineToFallback(const char *event, int rssi, const String &r
   globalLogSequence++;
   f.print(globalLogSequence);
   f.print(",FFAT,");
-  f.print(currentTimestamp());
-  f.print(",");
-  f.print(event);
-  f.print(",");
+  // Build 9b follow-up: timestamp/event/rssi_dbm are all bounded (a
+  // timestamp capped at ~19 chars, event one of a handful of short
+  // firmware literals, rssi a handful of digits or blank) -- one
+  // snprintf into a stack buffer instead of three separate f.print()
+  // calls. recommendation stays on its own through writeCsvField() (the
+  // one genuinely variable-length field); pingMs is always either "TIMEOUT"
+  // or a small digit string, already bounded at its call site, so it's
+  // still just printed directly after recommendation.
+  char buf[48];
   if (rssi == RSSI_NOT_FOUND) {
-    f.print("");
+    snprintf(buf, sizeof(buf), "%s,%s,,", currentTimestamp().c_str(), event);
   } else {
-    f.print(rssi);
+    snprintf(buf, sizeof(buf), "%s,%s,%d,", currentTimestamp().c_str(), event, rssi);
   }
-  f.print(",");
-  f.print(csvEscape(recommendation));
-  f.print(",");
+  f.print(buf);
+  writeCsvField(f, recommendation, false);
   f.println(pingMs);
   f.close();
   Serial.println("Mode 3: SD write failed — line saved to internal flash fallback instead (/monitor_log_fallback.csv)");
@@ -3720,18 +3871,17 @@ void appendMonitorLogLine(const char *event, int rssi, const String &recommendat
   globalLogSequence++;
   f.print(globalLogSequence);
   f.print(",SD,");
-  f.print(currentTimestamp());
-  f.print(",");
-  f.print(event);
-  f.print(",");
+  // Build 9b follow-up: see the matching comment in
+  // appendMonitorLogLineToFallback() -- same bounded-fields-in-one-buffer
+  // treatment here.
+  char buf[48];
   if (rssi == RSSI_NOT_FOUND) {
-    f.print("");
+    snprintf(buf, sizeof(buf), "%s,%s,,", currentTimestamp().c_str(), event);
   } else {
-    f.print(rssi);
+    snprintf(buf, sizeof(buf), "%s,%s,%d,", currentTimestamp().c_str(), event, rssi);
   }
-  f.print(",");
-  f.print(csvEscape(recommendation));
-  f.print(",");
+  f.print(buf);
+  writeCsvField(f, recommendation, false);
   f.println(pingMs);
   f.close();
 }
@@ -3752,13 +3902,20 @@ bool isDownloadableFilename(const String &name) {
 // Lists every file on SD and on the internal-flash (FFat) fallback, each as
 // a download link. No styling to speak of -- this is a utility page for
 // grabbing logs off the device, not something to look pretty.
+// Build 9b follow-up: used to build the whole page into one String (with
+// an upfront .reserve(4096) to reduce, but not eliminate, reallocation on
+// a card with many files -- the review's own point: 4KB covers maybe
+// 40-50 rows, and it grows-and-copies again past that). Streams
+// row-by-row with sendContent() instead, so no page-sized String ever
+// exists in memory at all -- this scales to any number of files with no
+// reallocation risk, not just a reduced one.
 void handleFileListPage() {
-  String html;
-  html.reserve(4096);   // Build 7.5: this is the one place in the sketch building a non-trivial String through repeated concatenation -- reserving up front avoids the repeated grow-and-copy reallocations that are the actual fragmentation risk, for the cost of one line
-  html = "<html><head><title>Wi-FEye files</title></head><body>";
-  html += "<h2>Wi-FEye log files</h2>";
+  fileServer.setContentLength(CONTENT_LENGTH_UNKNOWN);
+  fileServer.send(200, "text/html", "");
+  fileServer.sendContent("<html><head><title>Wi-FEye files</title></head><body>");
+  fileServer.sendContent("<h2>Wi-FEye log files</h2>");
 
-  html += "<h3>SD Card</h3><ul>";
+  fileServer.sendContent("<h3>SD Card</h3><ul>");
   if (app.sdCardAvailable) {
     File root = SD.open("/");
     File entry = root.openNextFile();
@@ -3768,19 +3925,19 @@ void handleFileListPage() {
         any = true;
         String name = String(entry.name());
         if (!name.startsWith("/")) name = "/" + name;
-        html += fileListRowHtml(name, entry.size(), "sd");
+        fileServer.sendContent(fileListRowHtml(name, entry.size(), "sd"));
       }
       entry.close();
       entry = root.openNextFile();
     }
     root.close();
-    if (!any) html += "<li>(no files)</li>";
+    if (!any) fileServer.sendContent("<li>(no files)</li>");
   } else {
-    html += "<li>(no SD card detected)</li>";
+    fileServer.sendContent("<li>(no SD card detected)</li>");
   }
-  html += "</ul>";
+  fileServer.sendContent("</ul>");
 
-  html += "<h3>Internal Flash (fallback logs)</h3><ul>";
+  fileServer.sendContent("<h3>Internal Flash (fallback logs)</h3><ul>");
   File ffatRoot = FFat.open("/");
   File ffatEntry = ffatRoot.openNextFile();
   bool anyFallback = false;
@@ -3789,16 +3946,15 @@ void handleFileListPage() {
       anyFallback = true;
       String name = String(ffatEntry.name());
       if (!name.startsWith("/")) name = "/" + name;
-      html += fileListRowHtml(name, ffatEntry.size(), "ffat");
+      fileServer.sendContent(fileListRowHtml(name, ffatEntry.size(), "ffat"));
     }
     ffatEntry.close();
     ffatEntry = ffatRoot.openNextFile();
   }
   ffatRoot.close();
-  if (!anyFallback) html += "<li>(no files)</li>";
-  html += "</ul></body></html>";
-
-  fileServer.send(200, "text/html", html);
+  if (!anyFallback) fileServer.sendContent("<li>(no files)</li>");
+  fileServer.sendContent("</ul></body></html>");
+  fileServer.sendContent("");   // terminates the chunked response
 }
 
 // Build 7.2: one file's <li> row -- the download link plus a small inline
@@ -4595,26 +4751,33 @@ void mode3Loop() {
       // interference/congestion note.
       mode3ConnectedAccumMs += entry.atMs - mode3LastStateChangeMs;
       mode3DropCount++;
-      // NOTE: cast to int before String += -- Arduino's String class
-      // treats a bare uint8_t/unsigned char argument to += as a
-      // character to append, not a number to format (a well-known
-      // Arduino-core gotcha), so an uncast reason code here would
-      // silently append a control character instead of e.g. "2".
-      String note = "reason=";
-      note += (int)entry.disconnectReason;
-      note += " (";
-      note += entry.hadReason ? wifiDisconnectReasonToString(entry.disconnectReason) : "unknown";
-      note += ")";
+      // Build 9b follow-up: was built via four-plus String += steps (each
+      // a potential reallocation); now one snprintf into a stack buffer.
+      // %d (not %u) for the reason code: it's cast to int first for the
+      // same reason the old += needed the cast -- see the NOTE this
+      // replaced, about Arduino's String class treating a bare
+      // uint8_t/unsigned char as a character to append rather than a
+      // number to format. That gotcha doesn't apply to snprintf's %d, but
+      // the explicit (int) cast is kept so the type is never ambiguous at
+      // a glance here either. interferenceNote is only ever "" or one of
+      // a couple of short fixed strings (see buildInterferenceNote()), so
+      // its length plus the fixed channel-survey suffix comfortably fits
+      // this buffer even in the worst case (all three pieces present).
+      const char *reasonLabel = entry.hadReason ? wifiDisconnectReasonToString(entry.disconnectReason) : "unknown";
       String interferenceNote = buildInterferenceNote(mode3LastKnownRssi, mode3NearbyApCount);
-      if (interferenceNote.length() > 0) note += " " + interferenceNote;
       // Build 7.5 item 2: a channel survey takes the radio off the
       // connected channel for a moment -- flag when a disconnect
       // coincided with one, so the log doesn't quietly blame the AP for
       // something this device's own scan may have caused.
-      if (entry.duringChannelSurvey) {
-        note += " (coincided with a channel-survey scan -- may be the scan itself briefly leaving the channel, not a genuine AP-side drop)";
-      }
-      appendMonitorLogLine("DISCONNECTED", RSSI_NOT_FOUND, note, "");
+      const char *surveyNote = entry.duringChannelSurvey
+        ? " (coincided with a channel-survey scan -- may be the scan itself briefly leaving the channel, not a genuine AP-side drop)"
+        : "";
+      char noteBuf[400];
+      snprintf(noteBuf, sizeof(noteBuf), "reason=%d (%s)%s%s%s",
+               (int)entry.disconnectReason, reasonLabel,
+               interferenceNote.length() > 0 ? " " : "", interferenceNote.c_str(),
+               surveyNote);
+      appendMonitorLogLine("DISCONNECTED", RSSI_NOT_FOUND, noteBuf, "");
       if (mode3AlertPiezoEnabled) {
         mode3AlertActive = true;   // silenced by any button press, or by reconnecting (below)
       }
@@ -4631,11 +4794,20 @@ void mode3Loop() {
       // at drain time (same as before this build) -- usually drained
       // within the same loop() iteration it was queued in, so this still
       // reflects the connection the entry is actually about.
-      String note = "SSID=" + WiFi.SSID() + " BSSID=" + WiFi.BSSIDstr();
-      if (entry.duringChannelSurvey) {
-        note += " (channel-survey scan was in flight when this reconnected)";
-      }
-      appendMonitorLogLine(evt, WiFi.RSSI(), note, "");
+      // Build 9b follow-up: WiFi.SSID()/WiFi.BSSIDstr() each still
+      // allocate their own String (that's the WiFi library's API, not
+      // something this sketch controls), but the += chain that used to
+      // join them is gone -- one snprintf into a stack buffer instead.
+      // An SSID is at most 32 bytes and a BSSIDstr() is always exactly
+      // "XX:XX:XX:XX:XX:XX" (17 chars); with the fixed prefixes and the
+      // optional channel-survey suffix, the worst case is ~120 bytes --
+      // 160 leaves comfortable headroom.
+      String ssid = WiFi.SSID();
+      String bssid = WiFi.BSSIDstr();
+      char noteBuf[160];
+      snprintf(noteBuf, sizeof(noteBuf), "SSID=%s BSSID=%s%s", ssid.c_str(), bssid.c_str(),
+               entry.duringChannelSurvey ? " (channel-survey scan was in flight when this reconnected)" : "");
+      appendMonitorLogLine(evt, WiFi.RSSI(), noteBuf, "");
     }
     mode3LastStateChangeMs = entry.atMs;
     refreshMode3Screen();
