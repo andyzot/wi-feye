@@ -134,9 +134,8 @@ button.ghost:hover{background:var(--accent-dim)}
 }
 .surveyToggle button.active{background:var(--accent); color:#fff; border-color:var(--accent)}
 .surveyToggle button:disabled{opacity:.4; cursor:not-allowed}
-.heatLegend{display:flex; align-items:center; gap:14px; flex-wrap:wrap; font-size:11px; color:var(--muted); margin-top:12px}
-.heatLegend .chip{display:inline-flex; align-items:center; gap:5px; white-space:nowrap}
-.heatLegend .sw{display:inline-block; width:10px; height:10px; border-radius:2px; flex:none}
+.heatLegend{display:flex; align-items:center; gap:8px; font-size:11px; color:var(--muted); margin-top:12px}
+.heatLegend .bar{flex:1; max-width:220px; height:10px; border-radius:3px; background:linear-gradient(to right, var(--bad), var(--warn), var(--good))}
 
 footer{margin-top:28px; color:var(--muted); font-size:12px; text-align:center}
 [hidden]{display:none!important}
@@ -283,17 +282,8 @@ footer{margin-top:28px; color:var(--muted); font-size:12px; text-align:center}
     </div>
   </div>
   <div class="mapwrap" id="mapWrap"><div class="mapempty">Add the matching floor-plan JPEG above to plot points on it — showing raw coordinates for now.</div></div>
-  <!-- Fixed, absolute-dBm scale (see the HEAT_STOPS comment in the
-       script) -- same six swatches regardless of which survey is
-       loaded, so this never needs to be rebuilt in JS the way a
-       per-survey-scaled legend would. -->
   <div class="heatLegend" id="heatLegend" hidden>
-    <span class="chip"><span class="sw" style="background:rgb(142,36,170)"></span>&le;-90 dBm very poor</span>
-    <span class="chip"><span class="sw" style="background:rgb(230,40,40)"></span>-80 dBm poor</span>
-    <span class="chip"><span class="sw" style="background:rgb(255,130,0)"></span>-72 dBm marginal</span>
-    <span class="chip"><span class="sw" style="background:rgb(255,210,0)"></span>-65 dBm fair</span>
-    <span class="chip"><span class="sw" style="background:rgb(170,230,40)"></span>-58 dBm good</span>
-    <span class="chip"><span class="sw" style="background:rgb(20,190,90)"></span>&ge;-50 dBm very good</span>
+    <span>-90 dBm</span><div class="bar"></div><span>-40 dBm</span>
   </div>
   <p id="heatmapNote" style="font-size:12px;color:var(--muted);margin:8px 0 0" hidden></p>
 </div>
@@ -563,78 +553,30 @@ function isValidSurveyPoint(r){
   return inPct(x) && inPct(y) && Number.isFinite(v);
 }
 
-/* ---------- RSSI -> color, for the heatmap only. Fixed, ABSOLUTE dBm
-   thresholds now (not scaled to each survey's own min/max, an earlier
-   attempt at this) -- color means the same real-world signal quality in
-   every survey, so two surveys' heatmaps are directly comparable, and a
-   survey that's uniformly weak everywhere reads as uniformly weak
-   rather than getting stretched to its own internal red-to-green
-   spread the way a per-survey scale would. Breakpoints follow the
-   standard rule-of-thumb RSSI quality tiers used in WiFi site-survey
-   practice (roughly: -67dBm reliable floor for VoIP/video, -70dBm
-   usable-for-browsing floor, -80dBm edge of unreliable) rather than
-   being centered on wherever THIS survey's readings happen to sit --
-   deliberately NOT shifted warmer/greener just to make a marginal
-   survey look better than it is; see renderSurvey()'s tier breakdown
-   text, which states plainly when most of a survey reads marginal or
-   worse.
-
-   Quantized to the NEAREST named tier (no blending between them) rather
-   than a smooth gradient -- a straight port of the "professional"
-   reference heatmap's own look, which reads as a handful of flat,
-   distinct colors with hard edges, not a continuous blend. Still
-   computed from a perfectly smooth/continuous IDW field underneath
-   (see drawHeatmap) -- quantizing only the COLOR, the same idea as
-   elevation contour lines, is what produces the hard edges; the
-   interpolation itself stays physically reasonable (see idwValue's
-   power at the call site).
-
-   Colors re-picked for saturation/brightness (confirmed against actual
-   pixel samples the user cropped from both this report's own render and
-   the reference image: the reference's colors sit near-maximally
-   saturated and fully opaque, ours came out muted both because these
-   RGB values themselves were less vivid AND because of the canvas alpha
-   below -- see that comment for the second half of this fix). Checked
-   with the dataviz skill's validate_palette.js (categorical six-check,
-   which is a conservative stand-in here -- this is really a fixed
-   "status" scale per that skill's taxonomy, reserved meaning,
-   always paired with a text label in the legend/tier-breakdown, not a
-   series-identity palette): even at this saturation, the fair/good
-   pair (bright yellow next to bright yellow-green) can't clear the
-   normal-vision separation floor -- any two highly-saturated hues that
-   close on the hue wheel collapse together under red-green color
-   vision deficiency almost regardless of exact shade, which is a known
-   limitation of "rainbow" style scales in general, the reference image
-   included (its own adjacent green swatches measured just as close).
-   Mitigated the only way available without abandoning the vivid look
-   the user asked for: every tier is paired with a text label, both in
-   the static legend and in the per-tap tier-breakdown sentence below,
-   so color is never the only way to tell two tiers apart. ---------- */
+/* ---------- RSSI -> continuous color, for the heatmap only. Reuses the
+   same three status hues already used everywhere else in this report
+   (good/warn/bad), just blended smoothly between them instead of banded,
+   so the heatmap sits visually consistent with the rest of the page
+   rather than introducing a separate sequential ramp. ---------- */
 const HEAT_STOPS = [
-  [-90, [142, 36, 170], "very poor"],
-  [-80, [230, 40, 40],  "poor"],
-  [-72, [255, 130, 0],  "marginal"],
-  [-65, [255, 210, 0],  "fair"],
-  [-58, [170, 230, 40], "good"],
-  [-50, [20, 190, 90],  "very good"],
+  [-95, [217, 54, 54]],   // --bad
+  [-75, [185, 121, 10]],  // --warn
+  [-55, [31, 157, 85]],   // --good
 ];
-// Nearest named tier to a given dBm value -- returns the full
-// [dbm, rgb, label] entry, not just a color, so callers (the legend
-// note's tier breakdown) can report which tier a reading fell into by
-// name, not just paint it.
-function heatTierFor(rssi){
-  const lo = HEAT_STOPS[0][0], hi = HEAT_STOPS[HEAT_STOPS.length-1][0];
-  const v = Math.max(lo, Math.min(hi, rssi));
+function rssiToRGB(rssi){
+  const v = Math.max(HEAT_STOPS[0][0], Math.min(HEAT_STOPS[HEAT_STOPS.length-1][0], rssi));
   for (let i = 0; i < HEAT_STOPS.length - 1; i++){
-    const a = HEAT_STOPS[i], b = HEAT_STOPS[i+1];
-    if (v >= a[0] && v <= b[0]){
-      return (v - a[0]) <= (b[0] - v) ? a : b;
+    const [a, ca] = HEAT_STOPS[i], [b, cb] = HEAT_STOPS[i+1];
+    if (v >= a && v <= b){
+      const t = (v - a) / (b - a);
+      return [
+        Math.round(ca[0] + (cb[0]-ca[0])*t),
+        Math.round(ca[1] + (cb[1]-ca[1])*t),
+        Math.round(ca[2] + (cb[2]-ca[2])*t),
+      ];
     }
   }
-  return HEAT_STOPS[HEAT_STOPS.length-1];
-}
-function rssiToRGB(rssi){
-  return heatTierFor(rssi)[1];
+  return HEAT_STOPS[HEAT_STOPS.length-1][1];
 }
 
 /* ---------- state ---------- */
@@ -1594,10 +1536,7 @@ window.addEventListener("resize", () => { if (currentHeatmapRedraw) currentHeatm
 
 function drawHeatmap(canvas, samples, dispW, dispH){
   if (!dispW || !dispH || !samples.length) return;
-  // A denser grid than a sparse real survey can really justify, so the
-  // tier boundaries (see heatTierFor/HEAT_STOPS above) aren't themselves
-  // blurred away again by a coarse grid getting smoothly upscaled.
-  const GW = 110, GH = Math.max(1, Math.round(GW * (dispH / dispW)));
+  const GW = 72, GH = Math.max(1, Math.round(GW * (dispH / dispW)));
   canvas.width = dispW;
   canvas.height = dispH;
 
@@ -1608,28 +1547,10 @@ function drawHeatmap(canvas, samples, dispW, dispH){
   for (let gy = 0; gy < GH; gy++){
     for (let gx = 0; gx < GW; gx++){
       const xPct = (gx + 0.5) / GW * 100, yPct = (gy + 0.5) / GH * 100;
-      // Power 3: left close to a physically-reasonable distance falloff
-      // -- an earlier attempt at a "distinct blobs" look cranked this
-      // all the way to 7 to carve sharper per-point zones through pure
-      // distance decay (approaching nearest-neighbor/Voronoi as power
-      // climbs further). Not needed: quantizing to the nearest named
-      // tier (see heatTierFor above) is what produces the sharp-edged
-      // contour-map look, so the interpolation underneath it is free to
-      // stay smooth and physically reasonable. Still no hard radius
-      // cutoff -- see the HEAT_STOPS comment above for why that's
-      // rejected either way.
-      const v = idwValue(xPct, yPct, samples, 3);
+      const v = idwValue(xPct, yPct, samples, 2);
       const [r,g,b] = rssiToRGB(v);
       const idx = (gy*GW + gx) * 4;
-      // 0.94, not fully 1.0: raised from an earlier 0.72 specifically
-      // because that alpha, composited over the page's light surface,
-      // was diluting every tier color toward white -- confirmed by
-      // sampling actual rendered pixels against the reference image's
-      // (fully opaque-looking) colors. Left just short of fully opaque
-      // so the floor-plan image underneath (walls, room labels) stays
-      // faintly legible through the fill rather than being hidden
-      // completely; a true 1.0 would erase it.
-      data.data[idx] = r; data.data[idx+1] = g; data.data[idx+2] = b; data.data[idx+3] = Math.round(0.94*255);
+      data.data[idx] = r; data.data[idx+1] = g; data.data[idx+2] = b; data.data[idx+3] = Math.round(0.55*255);
     }
   }
   sctx.putImageData(data, 0, 0);
@@ -1672,18 +1593,7 @@ function renderSurvey(survey){
   const note = document.getElementById("heatmapNote");
   if (mode === "heatmap"){
     note.hidden = false;
-    // Tier breakdown: counts each ACTUAL tapped reading (not the
-    // interpolated canvas) into its nearest named tier from HEAT_STOPS,
-    // so the color isn't the only place a predominantly weak survey
-    // shows up as weak -- stated here in plain words too, in the same
-    // worst-to-best order as the legend above, skipping any tier with
-    // zero readings rather than listing "0 very poor".
-    const counts = new Map(HEAT_STOPS.map(s => [s[2], 0]));
-    samples.forEach(s => { const tier = heatTierFor(s.v); counts.set(tier[2], (counts.get(tier[2]) || 0) + 1); });
-    const parts = HEAT_STOPS.map(s => s[2]).filter(label => counts.get(label) > 0)
-      .map(label => `${counts.get(label)} ${label}`);
-    const breakdown = parts.length ? parts.join(", ") : "no readings";
-    note.textContent = `Of ${samples.length} tapped readings here: ${breakdown}. Color is a fixed scale (see legend above), the same for every survey, not rescaled to this one's own range -- so a uniformly weak area reads as uniformly weak rather than being stretched to look like it has strong and weak spots. Shown as contour-style bands, not a smooth gradient, and interpolated between taps (inverse-distance weighting) rather than measured everywhere — treat it as an estimate, less reliable far from any tap or with few points logged.`;
+    note.textContent = "Color between taps is interpolated (inverse-distance weighting) from the logged points, not measured — treat it as an estimate, less reliable far from any tap or with few points logged.";
   } else {
     note.hidden = true;
   }
