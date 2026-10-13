@@ -1554,7 +1554,12 @@ window.addEventListener("resize", () => { if (currentHeatmapRedraw) currentHeatm
 
 function drawHeatmap(canvas, samples, dispW, dispH, lo, hi){
   if (!dispW || !dispH || !samples.length) return;
-  const GW = 72, GH = Math.max(1, Math.round(GW * (dispH / dispW)));
+  // A denser grid than a sparse real survey can really justify, so the
+  // sharper per-point "cells" a high IDW power produces (see idwValue's
+  // call below) aren't themselves blurred away again by a coarse grid
+  // getting smoothly upscaled -- see the comment there for why power is
+  // high in the first place.
+  const GW = 110, GH = Math.max(1, Math.round(GW * (dispH / dispW)));
   canvas.width = dispW;
   canvas.height = dispH;
 
@@ -1565,7 +1570,18 @@ function drawHeatmap(canvas, samples, dispW, dispH, lo, hi){
   for (let gy = 0; gy < GH; gy++){
     for (let gx = 0; gx < GW; gx++){
       const xPct = (gx + 0.5) / GW * 100, yPct = (gy + 0.5) / GH * 100;
-      const v = idwValue(xPct, yPct, samples, 4);
+      // Power 7 (up from an earlier 4): with a typically sparse survey
+      // (tens of taps across a whole room, not hundreds), there's no
+      // real data to justify the fine, cellular local texture a dense
+      // professional survey's heatmap shows -- but a higher power still
+      // gets closer to that look by letting each tap's own reading
+      // dominate its own neighborhood more sharply before blending into
+      // the next one, rather than smearing broadly across the whole
+      // unsampled gap. Still smooth, continuous IDW underneath (no hard
+      // radius cutoff -- see the HEAT_STOPS comment above for why that
+      // was rejected), so it never produces a flat "dead zone"; it just
+      // makes each tap's zone of influence narrower.
+      const v = idwValue(xPct, yPct, samples, 7);
       const [r,g,b] = rssiToRGB(v, lo, hi);
       const idx = (gy*GW + gx) * 4;
       data.data[idx] = r; data.data[idx+1] = g; data.data[idx+2] = b; data.data[idx+3] = Math.round(0.72*255);
