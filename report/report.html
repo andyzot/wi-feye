@@ -285,7 +285,7 @@ footer{margin-top:28px; color:var(--muted); font-size:12px; text-align:center}
   </div>
   <div class="mapwrap" id="mapWrap"><div class="mapempty">Add the matching floor-plan JPEG above to plot points on it — showing raw coordinates for now.</div></div>
   <div class="heatLegend" id="heatLegend" hidden>
-    <span>-90 dBm</span><div class="bar"></div><span>-40 dBm</span>
+    <span>-90 dBm</span><div class="bar"></div><span>-60 dBm</span>
   </div>
   <p id="heatmapNote" style="font-size:12px;color:var(--muted);margin:8px 0 0" hidden></p>
 </div>
@@ -436,9 +436,9 @@ function isValidSurveyPoint(r){
    so the heatmap sits visually consistent with the rest of the page
    rather than introducing a separate sequential ramp. ---------- */
 const HEAT_STOPS = [
-  [-95, [217, 54, 54]],   // --bad
-  [-75, [185, 121, 10]],  // --warn
-  [-55, [31, 157, 85]],   // --good
+  [-90, [217, 54, 54]],   // --bad -- matches rssiBand's "bad" (< -75), floor tightened
+  [-75, [185, 121, 10]],  // --warn -- matches rssiBand's "warn" threshold exactly
+  [-60, [31, 157, 85]],   // --good -- matches rssiBand's "good" threshold exactly
 ];
 function rssiToRGB(rssi){
   const v = Math.max(HEAT_STOPS[0][0], Math.min(HEAT_STOPS[HEAT_STOPS.length-1][0], rssi));
