@@ -1750,6 +1750,24 @@ int bestRssiFromScan(int n) {
   return bestRssi;
 }
 
+// TODO (next build): retry once on NOT_FOUND before giving up on a tap.
+// Investigated 2026-10-13 against a real 31-point survey: 6 taps came back
+// NOT_FOUND, but every one of them had a normal reading (-54 to -67 dBm, in
+// line with the rest of that survey) logged just 11-16s before AND after at
+// the same spot -- i.e. these read as a single scan missing the AP's beacon
+// on that attempt (dwell timing / momentary congestion / AP busy with
+// another client), not a real coverage gap. Plan: in checkPendingScan(),
+// if bestRssiFromScan() comes back RSSI_NOT_FOUND, don't finalize the point
+// yet -- kick off one more WiFi.scanNetworks(true) about a second later and
+// only fall back to the NOT_FOUND/grey dot if that second scan also misses.
+// Deliberately NOT a blanket "always scan twice": that would double the
+// wait on every single tap to fix something that only happened on ~1 in 6
+// taps in this survey. Needs a small bit of extra state (something like
+// app.scanRetryPending / a stored pendingPointIdx survives the retry --
+// pendingPointIdx already does) threaded through logSurveyPoint() and
+// checkPendingScan() below. Not implemented yet -- discussed with the user,
+// agreed to queue for the next build rather than change now.
+//
 // Called once per loop() iteration. No-op unless a scan is in flight.
 void checkPendingScan() {
   if (!app.scanPending) return;
