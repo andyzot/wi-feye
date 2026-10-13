@@ -134,8 +134,9 @@ button.ghost:hover{background:var(--accent-dim)}
 }
 .surveyToggle button.active{background:var(--accent); color:#fff; border-color:var(--accent)}
 .surveyToggle button:disabled{opacity:.4; cursor:not-allowed}
-.heatLegend{display:flex; align-items:center; gap:8px; font-size:11px; color:var(--muted); margin-top:12px}
-.heatLegend .bar{flex:1; max-width:220px; height:10px; border-radius:3px; background:linear-gradient(to right, var(--bad), var(--warn), var(--good))}
+.heatLegend{display:flex; align-items:center; gap:14px; flex-wrap:wrap; font-size:11px; color:var(--muted); margin-top:12px}
+.heatLegend .chip{display:inline-flex; align-items:center; gap:5px; white-space:nowrap}
+.heatLegend .sw{display:inline-block; width:10px; height:10px; border-radius:2px; flex:none}
 
 footer{margin-top:28px; color:var(--muted); font-size:12px; text-align:center}
 [hidden]{display:none!important}
@@ -282,8 +283,17 @@ footer{margin-top:28px; color:var(--muted); font-size:12px; text-align:center}
     </div>
   </div>
   <div class="mapwrap" id="mapWrap"><div class="mapempty">Add the matching floor-plan JPEG above to plot points on it — showing raw coordinates for now.</div></div>
+  <!-- Fixed, absolute-dBm scale (see the HEAT_STOPS comment in the
+       script) -- same six swatches regardless of which survey is
+       loaded, so this never needs to be rebuilt in JS the way a
+       per-survey-scaled legend would. -->
   <div class="heatLegend" id="heatLegend" hidden>
-    <span id="heatLegendLo">-90 dBm</span><div class="bar"></div><span id="heatLegendHi">-40 dBm</span>
+    <span class="chip"><span class="sw" style="background:rgb(60,30,90)"></span>&le;-90 dBm very poor</span>
+    <span class="chip"><span class="sw" style="background:rgb(200,60,60)"></span>-80 dBm poor</span>
+    <span class="chip"><span class="sw" style="background:rgb(230,140,40)"></span>-72 dBm marginal</span>
+    <span class="chip"><span class="sw" style="background:rgb(230,210,60)"></span>-65 dBm fair</span>
+    <span class="chip"><span class="sw" style="background:rgb(140,200,70)"></span>-58 dBm good</span>
+    <span class="chip"><span class="sw" style="background:rgb(40,180,90)"></span>&ge;-50 dBm very good</span>
   </div>
   <p id="heatmapNote" style="font-size:12px;color:var(--muted);margin:8px 0 0" hidden></p>
 </div>
@@ -553,72 +563,56 @@ function isValidSurveyPoint(r){
   return inPct(x) && inPct(y) && Number.isFinite(v);
 }
 
-/* ---------- RSSI -> continuous color, for the heatmap only. Reuses the
-   same three status hues already used everywhere else in this report
-   (good/warn/bad), just blended smoothly between them instead of banded,
-   so the heatmap sits visually consistent with the rest of the page
-   rather than introducing a separate sequential ramp.
+/* ---------- RSSI -> color, for the heatmap only. Fixed, ABSOLUTE dBm
+   thresholds now (not scaled to each survey's own min/max, an earlier
+   attempt at this) -- color means the same real-world signal quality in
+   every survey, so two surveys' heatmaps are directly comparable, and a
+   survey that's uniformly weak everywhere reads as uniformly weak
+   rather than getting stretched to its own internal red-to-green
+   spread the way a per-survey scale would. Breakpoints follow the
+   standard rule-of-thumb RSSI quality tiers used in WiFi site-survey
+   practice (roughly: -67dBm reliable floor for VoIP/video, -70dBm
+   usable-for-browsing floor, -80dBm edge of unreliable) rather than
+   being centered on wherever THIS survey's readings happen to sit --
+   deliberately NOT shifted warmer/greener just to make a marginal
+   survey look better than it is; see renderSurvey()'s tier breakdown
+   text, which states plainly when most of a survey reads marginal or
+   worse.
 
-   Stops are fractional positions (0..1) along THIS SURVEY's own
-   weakest-to-strongest reading, not fixed absolute dBm values -- a
-   fixed -95..-55 scale meant a survey whose real spread was narrow
-   (e.g. a 12dB range on one small floor) only ever painted a narrow
-   slice of the ramp, looking washed-out regardless of interpolation
-   tuning, even though the weakest point on THAT survey really is its
-   weak spot. Rescaling per-survey makes every survey use the full
-   red-to-green ramp between its own min and max, at the cost of "red"
-   meaning a different absolute dBm in different surveys -- the legend
-   is filled in with the actual dBm bounds each time specifically so
-   that's never hidden. See rssiToRGB()'s lo/hi params and the legend
-   update in renderSurvey().
-
-   Quantized into HEAT_BANDS discrete steps rather than blended
-   continuously, on user feedback that a smoothly-blended render (even
-   after the per-survey rescale above, and even after tuning IDW's own
-   power way up) still read as a couple of soft, merged washes rather
-   than the distinct, sharp-edged blobs of a reference "professional"
-   heatmap image they compared against. That reference's look is a
-   contour-map one: a handful of flat color bands with a hard edge
-   wherever the underlying (still perfectly smooth/continuous) signal
-   field crosses a threshold, the same idea as elevation contour lines
-   -- NOT smaller/tighter blending. Once banding does that visual job,
-   IDW's power can go back down to something closer to physically
-   reasonable falloff (see the call site in drawHeatmap) instead of the
-   artificially cranked-up value an earlier attempt at this used to
-   fake sharp edges through pure distance-decay alone. ---------- */
+   Quantized to the NEAREST named tier (no blending between them) rather
+   than a smooth gradient -- a straight port of the "professional"
+   reference heatmap's own look, which reads as a handful of flat,
+   distinct colors with hard edges, not a continuous blend. Still
+   computed from a perfectly smooth/continuous IDW field underneath
+   (see drawHeatmap) -- quantizing only the COLOR, the same idea as
+   elevation contour lines, is what produces the hard edges; the
+   interpolation itself stays physically reasonable (see idwValue's
+   power at the call site). ---------- */
 const HEAT_STOPS = [
-  [0.00, [217, 54, 54]],   // --bad   (this survey's weakest reading)
-  [0.25, [214, 94, 29]],
-  [0.50, [185, 121, 10]],  // --warn
-  [0.75, [120, 140, 26]],
-  [1.00, [31, 157, 85]],   // --good  (this survey's strongest reading)
+  [-90, [60, 30, 90],   "very poor"],
+  [-80, [200, 60, 60],  "poor"],
+  [-72, [230, 140, 40], "marginal"],
+  [-65, [230, 210, 60], "fair"],
+  [-58, [140, 200, 70], "good"],
+  [-50, [40, 180, 90],  "very good"],
 ];
-const HEAT_BANDS = 8;
-function colorAtT(t){
+// Nearest named tier to a given dBm value -- returns the full
+// [dbm, rgb, label] entry, not just a color, so callers (the legend
+// note's tier breakdown) can report which tier a reading fell into by
+// name, not just paint it.
+function heatTierFor(rssi){
+  const lo = HEAT_STOPS[0][0], hi = HEAT_STOPS[HEAT_STOPS.length-1][0];
+  const v = Math.max(lo, Math.min(hi, rssi));
   for (let i = 0; i < HEAT_STOPS.length - 1; i++){
-    const [a, ca] = HEAT_STOPS[i], [b, cb] = HEAT_STOPS[i+1];
-    if (t >= a && t <= b){
-      const tt = (t - a) / (b - a);
-      return [
-        Math.round(ca[0] + (cb[0]-ca[0])*tt),
-        Math.round(ca[1] + (cb[1]-ca[1])*tt),
-        Math.round(ca[2] + (cb[2]-ca[2])*tt),
-      ];
+    const a = HEAT_STOPS[i], b = HEAT_STOPS[i+1];
+    if (v >= a[0] && v <= b[0]){
+      return (v - a[0]) <= (b[0] - v) ? a : b;
     }
   }
-  return HEAT_STOPS[HEAT_STOPS.length-1][1];
+  return HEAT_STOPS[HEAT_STOPS.length-1];
 }
-function rssiToRGB(rssi, lo, hi){
-  // Degenerate case: every sample read the same, or lo/hi weren't
-  // passed -- nothing to scale against, so just render the top of the
-  // ramp rather than dividing by zero.
-  const t = hi > lo ? Math.max(0, Math.min(1, (rssi - lo) / (hi - lo))) : 1;
-  // Snap to the band's own center color (not its raw edge) so each
-  // band renders as one flat, readable color rather than still
-  // blending across its own width.
-  const bandIdx = Math.min(HEAT_BANDS - 1, Math.floor(t * HEAT_BANDS));
-  const bandT = (bandIdx + 0.5) / HEAT_BANDS;
-  return colorAtT(bandT);
+function rssiToRGB(rssi){
+  return heatTierFor(rssi)[1];
 }
 
 /* ---------- state ---------- */
@@ -1576,13 +1570,11 @@ function idwValue(xPct, yPct, samples, power){
 let currentHeatmapRedraw = null;
 window.addEventListener("resize", () => { if (currentHeatmapRedraw) currentHeatmapRedraw(); });
 
-function drawHeatmap(canvas, samples, dispW, dispH, lo, hi){
+function drawHeatmap(canvas, samples, dispW, dispH){
   if (!dispW || !dispH || !samples.length) return;
   // A denser grid than a sparse real survey can really justify, so the
-  // sharper per-point "cells" a high IDW power produces (see idwValue's
-  // call below) aren't themselves blurred away again by a coarse grid
-  // getting smoothly upscaled -- see the comment there for why power is
-  // high in the first place.
+  // tier boundaries (see heatTierFor/HEAT_STOPS above) aren't themselves
+  // blurred away again by a coarse grid getting smoothly upscaled.
   const GW = 110, GH = Math.max(1, Math.round(GW * (dispH / dispW)));
   canvas.width = dispW;
   canvas.height = dispH;
@@ -1595,18 +1587,17 @@ function drawHeatmap(canvas, samples, dispW, dispH, lo, hi){
     for (let gx = 0; gx < GW; gx++){
       const xPct = (gx + 0.5) / GW * 100, yPct = (gy + 0.5) / GH * 100;
       // Power 3: left close to a physically-reasonable distance falloff
-      // -- the earlier attempt at a "distinct blobs" look cranked this
-      // all the way to 7, which does carve sharper per-point zones, but
-      // only by making distance decay itself extreme (approaching
-      // nearest-neighbor/Voronoi as power climbs further). That's no
-      // longer needed: HEAT_BANDS quantization (see above) is what now
-      // produces the sharp-edged contour-map look the reference image
-      // actually has, so the interpolation underneath it is free to
-      // stay smooth and go back to a milder power. Still no hard radius
+      // -- an earlier attempt at a "distinct blobs" look cranked this
+      // all the way to 7 to carve sharper per-point zones through pure
+      // distance decay (approaching nearest-neighbor/Voronoi as power
+      // climbs further). Not needed: quantizing to the nearest named
+      // tier (see heatTierFor above) is what produces the sharp-edged
+      // contour-map look, so the interpolation underneath it is free to
+      // stay smooth and physically reasonable. Still no hard radius
       // cutoff -- see the HEAT_STOPS comment above for why that's
       // rejected either way.
       const v = idwValue(xPct, yPct, samples, 3);
-      const [r,g,b] = rssiToRGB(v, lo, hi);
+      const [r,g,b] = rssiToRGB(v);
       const idx = (gy*GW + gx) * 4;
       data.data[idx] = r; data.data[idx+1] = g; data.data[idx+2] = b; data.data[idx+3] = Math.round(0.72*255);
     }
@@ -1649,20 +1640,20 @@ function renderSurvey(survey){
 
   document.getElementById("heatLegend").hidden = mode !== "heatmap";
   const note = document.getElementById("heatmapNote");
-  // Color is scaled to THIS survey's own weakest-to-strongest reading
-  // (see the comment above HEAT_STOPS) -- computed here, once, and
-  // reused for both the legend labels and the actual pixels drawn
-  // below, so the legend never shows a different range than what was
-  // actually rendered.
-  let heatLo = 0, heatHi = 0;
   if (mode === "heatmap"){
-    const vals = samples.map(s => s.v);
-    heatLo = Math.min(...vals);
-    heatHi = Math.max(...vals);
-    document.getElementById("heatLegendLo").textContent = `${Math.round(heatLo)} dBm`;
-    document.getElementById("heatLegendHi").textContent = `${Math.round(heatHi)} dBm`;
     note.hidden = false;
-    note.textContent = `Color is scaled to this survey's own readings (${Math.round(heatLo)} to ${Math.round(heatHi)} dBm here) rather than a fixed scale, so it isn't directly comparable to a heatmap from a different survey. Shown as contour-style bands, not a smooth gradient, and interpolated between taps (inverse-distance weighting) rather than measured everywhere — treat it as an estimate, less reliable far from any tap or with few points logged.`;
+    // Tier breakdown: counts each ACTUAL tapped reading (not the
+    // interpolated canvas) into its nearest named tier from HEAT_STOPS,
+    // so the color isn't the only place a predominantly weak survey
+    // shows up as weak -- stated here in plain words too, in the same
+    // worst-to-best order as the legend above, skipping any tier with
+    // zero readings rather than listing "0 very poor".
+    const counts = new Map(HEAT_STOPS.map(s => [s[2], 0]));
+    samples.forEach(s => { const tier = heatTierFor(s.v); counts.set(tier[2], (counts.get(tier[2]) || 0) + 1); });
+    const parts = HEAT_STOPS.map(s => s[2]).filter(label => counts.get(label) > 0)
+      .map(label => `${counts.get(label)} ${label}`);
+    const breakdown = parts.length ? parts.join(", ") : "no readings";
+    note.textContent = `Of ${samples.length} tapped readings here: ${breakdown}. Color is a fixed scale (see legend above), the same for every survey, not rescaled to this one's own range -- so a uniformly weak area reads as uniformly weak rather than being stretched to look like it has strong and weak spots. Shown as contour-style bands, not a smooth gradient, and interpolated between taps (inverse-distance weighting) rather than measured everywhere — treat it as an estimate, less reliable far from any tap or with few points logged.`;
   } else {
     note.hidden = true;
   }
@@ -1684,7 +1675,7 @@ function renderSurvey(survey){
     const canvas = document.createElement("canvas");
     canvas.className = "heatCanvas";
     wrap.appendChild(canvas);
-    const draw = () => requestAnimationFrame(() => drawHeatmap(canvas, samples, wrap.clientWidth, wrap.clientHeight, heatLo, heatHi));
+    const draw = () => requestAnimationFrame(() => drawHeatmap(canvas, samples, wrap.clientWidth, wrap.clientHeight));
     currentHeatmapRedraw = draw;
     if (imgEl.complete) draw();
     else imgEl.addEventListener("load", draw, { once: true });
