@@ -560,7 +560,9 @@ function isValidSurveyPoint(r){
    rather than introducing a separate sequential ramp. ---------- */
 const HEAT_STOPS = [
   [-95, [217, 54, 54]],   // --bad
+  [-85, [214, 94, 29]],   // bad -> warn
   [-75, [185, 121, 10]],  // --warn
+  [-65, [120, 140, 26]],  // warn -> good
   [-55, [31, 157, 85]],   // --good
 ];
 function rssiToRGB(rssi){
@@ -1547,10 +1549,10 @@ function drawHeatmap(canvas, samples, dispW, dispH){
   for (let gy = 0; gy < GH; gy++){
     for (let gx = 0; gx < GW; gx++){
       const xPct = (gx + 0.5) / GW * 100, yPct = (gy + 0.5) / GH * 100;
-      const v = idwValue(xPct, yPct, samples, 2);
+      const v = idwValue(xPct, yPct, samples, 4);
       const [r,g,b] = rssiToRGB(v);
       const idx = (gy*GW + gx) * 4;
-      data.data[idx] = r; data.data[idx+1] = g; data.data[idx+2] = b; data.data[idx+3] = Math.round(0.55*255);
+      data.data[idx] = r; data.data[idx+1] = g; data.data[idx+2] = b; data.data[idx+3] = Math.round(0.72*255);
     }
   }
   sctx.putImageData(data, 0, 0);
