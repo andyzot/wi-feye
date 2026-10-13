@@ -1,0 +1,2031 @@
+<!doctype html><html><head><meta charset=utf8><meta name=viewport content="width=device-width,initial-scale=1,viewport-fit=cover"><style>:root{color-scheme:light;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}html{scroll-padding-top:env(safe-area-inset-top,0px)}body{margin:0;padding:0;font:14px -apple-system,BlinkMacSystemFont,sans-serif;background:#fff;color:#000}img{max-width:100%}[hidden]:not([hidden=until-found i]){display:none!important}</style></head><body>
+<title>Wi-FEye Report</title>
+<style>
+/* Layout: instrument-panel dashboard -- a top strip of headline readouts,
+   then stacked "scope" panels (RSSI trace, zone bars, disconnect timeline,
+   floor-plan plot), each panel self-contained and collapsible on phones. */
+:root{
+  --bg:#f4f6f8; --surface:#ffffff; --surface2:#eef1f4; --border:#d7dee5;
+  --fg:#10151b; --muted:#5c6b7a;
+  --accent:#0077a8; --accent-dim:#cfe9f2;
+  --good:#1f9d55; --good-dim:#dff3e6;
+  --warn:#b9790a; --warn-dim:#fbecd4;
+  --bad:#d93636; --bad-dim:#fbdede;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#0b0f14; --surface:#121820; --surface2:#182230; --border:#243140;
+    --fg:#e8edf2; --muted:#8697a8;
+    --accent:#4fd1ff; --accent-dim:#153440;
+    --good:#3ddc84; --good-dim:#123323;
+    --warn:#f5b942; --warn-dim:#3a2c0f;
+    --bad:#ff5c5c; --bad-dim:#3a1616;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#0b0f14; --surface:#121820; --surface2:#182230; --border:#243140;
+  --fg:#e8edf2; --muted:#8697a8;
+  --accent:#4fd1ff; --accent-dim:#153440;
+  --good:#3ddc84; --good-dim:#123323;
+  --warn:#f5b942; --warn-dim:#3a2c0f;
+  --bad:#ff5c5c; --bad-dim:#3a1616;
+  color-scheme: dark;
+}
+*{box-sizing:border-box}
+body{
+  background:var(--bg); color:var(--fg);
+  font-family:"IBM Plex Mono", "SF Mono", monospace;
+  padding-inline:16px; padding-block:20px 48px;
+  max-width:980px; margin-inline:auto;
+}
+h1,h2,h3{font-family:"Barlow Condensed","Archivo Narrow",sans-serif; text-wrap:balance; letter-spacing:.2px; margin:0}
+h1{font-size:28px; font-weight:700}
+h2{font-size:17px; font-weight:600; text-transform:uppercase; letter-spacing:1.2px; color:var(--muted)}
+.tabular{font-variant-numeric:tabular-nums}
+a{color:var(--accent)}
+
+.masthead{display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap; margin-bottom:4px}
+.masthead .title-row{display:flex; align-items:center; gap:10px; flex-wrap:wrap}
+.masthead .sub{color:var(--muted); font-size:13px; width:100%}
+.logo-chip{
+  display:inline-flex; align-items:center; justify-content:center;
+  width:34px; height:34px; border-radius:8px; background:#fff;
+  border:1px solid var(--border); box-shadow:0 1px 3px rgba(0,0,0,.12);
+  padding:5px; flex:none;
+}
+.logo-chip img{display:block; width:100%; height:100%; object-fit:contain}
+.dot{display:inline-block; width:8px; height:8px; border-radius:50%; background:var(--accent); margin-right:8px; box-shadow:0 0 8px var(--accent)}
+
+.banner{
+  display:flex; align-items:center; gap:10px; flex-wrap:wrap;
+  background:var(--warn-dim); border:1px solid var(--warn); color:var(--fg);
+  border-radius:6px; padding:10px 12px; font-size:13px; margin-block:18px;
+}
+.banner.info{background:var(--accent-dim); border-color:var(--accent)}
+.banner button{margin-left:auto}
+
+.uploader{
+  border:1px dashed var(--border); border-radius:8px; padding:16px;
+  background:var(--surface); margin-block:18px; display:flex; flex-direction:column; gap:10px;
+}
+.uploader .row{display:flex; gap:10px; flex-wrap:wrap; align-items:center}
+.uploader label{font-size:12px; color:var(--muted); text-transform:uppercase; letter-spacing:.8px; min-width:120px}
+input[type=file]{
+  font:inherit; color:var(--fg); background:var(--surface2); border:1px solid var(--border);
+  border-radius:5px; padding:6px 8px; flex:1; min-width:0;
+}
+.filelist{font-size:12px; color:var(--muted)}
+.filelist strong{color:var(--good)}
+
+.panel{
+  background:var(--surface); border:1px solid var(--border); border-radius:10px;
+  padding:16px; margin-block:16px;
+}
+.panel-head{display:flex; align-items:baseline; justify-content:space-between; gap:10px; flex-wrap:wrap; margin-bottom:12px}
+
+.readouts{display:grid; grid-template-columns:repeat(auto-fit,minmax(130px,1fr)); gap:10px; margin-block:16px}
+.readout{background:var(--surface); border:1px solid var(--border); border-radius:8px; padding:10px 12px}
+.readout .label{font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.8px}
+.readout .value{font-size:22px; font-weight:600; margin-top:2px}
+.readout .value.good{color:var(--good)} .readout .value.warn{color:var(--warn)} .readout .value.bad{color:var(--bad)}
+
+.legend{display:flex; gap:14px; font-size:12px; color:var(--muted); flex-wrap:wrap}
+.legend .sw{display:inline-block; width:10px; height:10px; border-radius:2px; margin-right:5px; vertical-align:-1px}
+
+svg.chart{width:100%; height:auto; display:block}
+svg.chart text{font-family:"IBM Plex Mono",monospace; fill:var(--muted)}
+svg.chart .axis{stroke:var(--border)}
+svg.chart .grid{stroke:var(--border); stroke-dasharray:2,3}
+
+table{width:100%; border-collapse:collapse; font-size:13px}
+th,td{text-align:left; padding:6px 8px; border-bottom:1px solid var(--border)}
+th{color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.6px; font-weight:600}
+tr:last-child td{border-bottom:none}
+.tablewrap{overflow-x:auto}
+
+.pill{display:inline-block; font-size:11px; padding:2px 8px; border-radius:999px; font-weight:600}
+.pill.good{background:var(--good-dim); color:var(--good)}
+.pill.warn{background:var(--warn-dim); color:var(--warn)}
+.pill.bad{background:var(--bad-dim); color:var(--bad)}
+.pill.info{background:var(--accent-dim); color:var(--accent)}
+.pill.muted{background:var(--surface2); color:var(--muted)}
+
+button.ghost{
+  font:inherit; font-size:12px; background:transparent; color:var(--accent);
+  border:1px solid var(--accent); border-radius:5px; padding:5px 10px; cursor:pointer;
+}
+button.ghost:hover{background:var(--accent-dim)}
+
+.mapwrap{position:relative; border:1px solid var(--border); border-radius:8px; overflow:hidden; background:var(--surface2)}
+.mapwrap img{display:block; width:100%; height:auto}
+.mapdot{
+  position:absolute; width:14px; height:14px; border-radius:50%; transform:translate(-50%,-50%);
+  border:2px solid rgba(0,0,0,.35); cursor:pointer;
+}
+.heatCanvas{position:absolute; inset:0; width:100%; height:100%; pointer-events:none}
+.mapempty{display:flex; align-items:center; justify-content:center; height:220px; color:var(--muted); font-size:13px}
+
+.surveyToggle{display:flex; gap:8px; align-items:center}
+.surveyToggle button{
+  font:inherit; font-size:12px; background:var(--surface2); color:var(--fg);
+  border:1px solid var(--border); border-radius:5px; padding:4px 10px; cursor:pointer;
+}
+.surveyToggle button.active{background:var(--accent); color:#fff; border-color:var(--accent)}
+.surveyToggle button:disabled{opacity:.4; cursor:not-allowed}
+.heatLegend{display:flex; align-items:center; gap:8px; font-size:11px; color:var(--muted); margin-top:12px}
+.heatLegend .bar{flex:1; max-width:220px; height:10px; border-radius:3px; background:linear-gradient(to right, var(--bad), var(--warn), var(--good))}
+
+footer{margin-top:28px; color:var(--muted); font-size:12px; text-align:center}
+[hidden]{display:none!important}
+
+/* Export bar: only ever shown when this file is opened on its own (saved
+   locally and double-clicked, or opened in its own browser tab) rather
+   than inside the hosted viewer's sandboxed frame -- see the standalone
+   check in the script below. Printing/downloading from inside that frame
+   is blocked by the platform itself, so there's no working button to show
+   there; this one only renders where it will actually do something. */
+.exportbar{display:flex; gap:10px; flex-wrap:wrap; margin-block:14px}
+.exportbar button{
+  font:inherit; font-size:13px; background:var(--surface); color:var(--fg);
+  border:1px solid var(--border); border-radius:6px; padding:8px 14px; cursor:pointer;
+}
+.exportbar button:hover{border-color:var(--accent); color:var(--accent)}
+
+@media print{
+  body{max-width:none; background:#fff; color:#000}
+  .uploader, .exportbar, #exampleBanner{display:none!important}
+  .panel{break-inside:avoid; border-color:#ccc}
+  svg.chart text{fill:#000}
+  svg.chart .grid, svg.chart .axis{stroke:#999}
+}
+</style>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+
+<div class="masthead">
+  <div class="title-row">
+    <span class="logo-chip"><img src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAATYAAADuAQMAAACJaLkcAAAABlBMVEX///8AAABVwtN+AAAGf0lEQVR42u1aO47cRhAtNgfiBoJmQgWCOb7BhAoMc30THcGhA8PTgQ6gI+xR2jfYI7QBBQppYQJK4LId9K+quoq7oQGbiYZisbt+/epVcQH+v/5bVx9CWF8m9gLBY0jXvliXxcJCHxh6+0f5NXi6ALkb0CrBqOt1eLNuVuXegH6Hr0CvWVlvYK+9VuR+4y53or3dxvX4diet90Oj7yDu+6E1zAn7Dksr93Ro13srJc/zzouXb9brRc+fGrl3otybRu4s56Nl9rZOjtffJ7reKyU17ti+7xW5gcnda7lmiX6aekVBs69eUdA0QQtd1yEt6ArXEqmowFhDZ8XjnQFjYCE2LGs+5lS2TYjxNr7NnxWtlIMbUJTPQiLldx3s/mdHbOXKVF2GVjv09lL0y0nxQA9C8nY5SzC1eFIhOEKrQcnyyOQ2mjJZkTZlRmpwLyJytc9TjHfamV7o8kLyTSVypgDQN0HukUROcjLR3OIbMeuvWXOT/R3wM0sB8IzMnYkvFnI3A5icsDMB8yE5aUVnbsLqTaxeXpNjTIpu4KVgRgqaeoK+xn9+r4XY8txA3uubqtWnDDEkRX/ClT0ifgWhmlMdwXBXDSlyCyUH6OCOUS7tG+V+FYrHXJxR9uil+tsTOxyvtyUMG477xsANQ9o1azqlH11TtVx6vOR9bzJveJ8iEuV8CualkXuVXDHnHLNKwbRRHZdDKHmlRD2ndxfNOApySzQkplaIWXsRjtEBAMCXnJ3Vem4zcTAA4B4b4gao7H1fRCIpUywjlYm2/Fa5wnL+6rruAGr5FrKTVzfs5ZWdY6/wYYaxDbaPHHtHur6h1exLkfss8mYIDV2fJFjsWm2OksGD8DIx2GC/PzWx5XGaBGcRZDX4XVovv7NqWXRZxSrTmjuLMYKGl3xicjel7sg5ZHlcSoH7GTSy1yP1+po1x5pBpimOKwBMXlawr+pNgeE11y8G7ehQc4SSoMqtBKLfCAGK+3qB9g3Mz1t+t/LPd3UP6lEOvQkTV1bfV7pt2vjK5KYMdawcjSw5xgyd6IoRoXk/g28aPQ8AC1C5BRxGp3IyvgNlU5Hf04K00YYY0QwGkhrlH7Rmi+HHndZsMbnLTl+LYZ4rhDt0s9MkdvZFZhBD0Ho5p/4scC/XiqkuMoSdKQeGylFh1DVHLb7RByozwSAn2HEgPO6mNrFHWj8mCemK6l57zdC+qW70dW9OgwA/2AacK7P1TN9VWc/vom4xcOPxUdbbeD1S5D7nkFmprar+y3wv7tfLfj7GsI+1qmH7DfNe5+s4wIIkd4MbGuosAPAATsw/jyBhA4BjkOIW4AEhVucBbkrPRPr8FaBbnx/rtYxJO8J+R67BZyVf7vUJokTa1P5V5J76nPCiwh+luUGFP7JeX+YvFgCgc7vec8XfmgfHqv2RN/Z43w+V7HzdGRp1TW+/42WPdXW6l0vTqsFV3GoFgCH4lBKL2tt7ALiGLW2s47iL5lCK1JqRF/Jpeavg85aq5im1nPeKuTMy4EgMNqTaPqY1Dgn/7hRzS1lKPzbZ3K2kCn6xje5SzohNfreNfiaBz+HplJScscEGn4ZHALi73VIdueF6Qvo3BwAwb+luEyv1lLQeHWTH4QgbBAWhtv53eA7G3RIpoIVr+jkixxh0jpc6TTvkUYRlciaPZlDoF3RrULZwurIixxjEwZww1zsJhyPX3TLIQEcE9Y0BjZK7/OPQzp+3BlOd2F/GLYLryglCDjTcfXCuSyAHGuY+gLevJQeaxn3DhbUkGvpTN56JnP49i/L2TSRdhzZI5VBjLn5s/CLn5KkGyVTl28N/rpTGVHUl0gV8fjBTF4Uc6kWoMciOLUOEZ+ut2RZLY8DlNppRm+I+gLxHHRFj91XlLflosTL3VTnXOga5r8r59NvXOeS9lB/H0gEGhEPtXOpGjJtTeZ/FPD2XU+I5RBhMEk8loLmLbHEXbHyyYZYSdvgzrgurUn5z2dgYuuB9vyS1XBrR9GRMRecHl9Iex0Ih8d0tPfuSCsmFONSQFDZp3Vx7rUYmbeEHncoPxpSCY1jSQVhUGraWQzSpRKwnhXmHeeJHw04jf2U8bNvjf7blbiIRQzzR77J7T0jCTqfs9rrfht7r6r2cj9Me9VP7EUFqGMIv8KKN553+Y2m+Wcn7PtWNw487fQ/qt5Y9MdRw2V254urn/oCje9lyBJ+fF2wzVPgMELSPA//m6x8oze6bg1ZjpgAAAABJRU5ErkJggg==" alt="Wi-FEye logo"></span>
+    <h1>Wi-FEye Report</h1>
+  </div>
+  <div class="sub">reads the CSV logs straight off the device's own file-access server</div>
+</div>
+
+<div id="exampleBanner" class="banner info">
+  Showing example data so you can see what this does. Upload your own CSV files below (downloaded from Wi-FEye's Mode 3 web server) to replace it.
+  <button class="ghost" id="dismissExample">Got it</button>
+</div>
+
+<div class="uploader">
+  <div class="row">
+    <label>CSV logs</label>
+    <input type="file" id="csvInput" accept=".csv,text/csv" multiple>
+  </div>
+  <div class="row">
+    <label>Floor plan (optional)</label>
+    <input type="file" id="imgInput" accept="image/*">
+  </div>
+  <div class="filelist" id="fileStatus">No files loaded yet — drop in monitor_log, walk_survey, survey or boot_log CSVs, any combination, SD and FFat copies included.</div>
+</div>
+
+<div id="gapBanner" class="banner" hidden></div>
+
+<div class="exportbar" id="exportBar" hidden>
+  <button id="printBtn">Print / Save as PDF</button>
+  <button id="downloadBtn">Download summary (.txt)</button>
+</div>
+
+<div class="readouts" id="readouts"></div>
+
+<div class="panel" id="monitorPanel" hidden>
+  <div class="panel-head">
+    <h2>Mode 3 &middot; Connection trace</h2>
+    <div class="legend">
+      <span><span class="sw" style="background:var(--good)"></span>&ge; -60 dBm</span>
+      <span><span class="sw" style="background:var(--warn)"></span>-60 to -75</span>
+      <span><span class="sw" style="background:var(--bad)"></span>&lt; -75</span>
+    </div>
+  </div>
+  <div class="legend" style="margin:0 0 6px">
+    <span style="color:var(--muted);font-size:11px;margin-right:2px">Sessions:</span>
+    <span><span class="sw" style="background:var(--good)"></span>Connected</span>
+    <span><span class="sw" style="background:var(--bad)"></span>Disconnected</span>
+    <span><span class="sw" style="background:var(--muted);opacity:.5"></span>No evidence</span>
+  </div>
+  <div class="legend" style="margin:0 0 6px;font-size:11px">
+    <span style="color:var(--muted);margin-right:2px">Marks:</span>
+    <span>| Disconnect</span>
+    <span><span class="sw" style="background:var(--accent);transform:rotate(45deg)"></span>NTP sync</span>
+    <span><span class="sw" style="background:var(--warn);transform:rotate(45deg)"></span>Dropped events</span>
+  </div>
+  <svg id="timelineChart" class="chart" viewBox="0 0 900 54" style="height:54px;margin-bottom:10px"></svg>
+  <svg id="rssiChart" class="chart" viewBox="0 0 900 220"></svg>
+  <h2 style="margin-top:16px;margin-bottom:8px">Gateway ping</h2>
+  <svg id="pingChart" class="chart" viewBox="0 0 900 160"></svg>
+</div>
+
+<div class="panel" id="eventsPanel" hidden>
+  <div class="panel-head"><h2>Connection events</h2></div>
+  <div class="tablewrap"><table id="eventsTable"><thead><tr><th>Time</th><th>Event</th><th>Detail</th></tr></thead><tbody></tbody></table></div>
+</div>
+
+<div class="panel" id="bootPanel" hidden>
+  <div class="panel-head"><h2>Boot history</h2></div>
+  <p style="font-size:12px;color:var(--muted);margin:0 0 10px">
+    One row per power-on/reset, written in setup() before any mode is chosen -- this is a device-wide history, not tied to any one survey session. Needs firmware Build 8.1 or later (/boot_log.csv).
+  </p>
+  <div class="tablewrap"><table id="bootTable"><thead><tr><th>Time</th><th>Reset reason</th></tr></thead><tbody></tbody></table></div>
+</div>
+
+<div class="panel" id="reasonsPanel" hidden>
+  <div class="panel-head"><h2>Disconnect reasons</h2></div>
+  <svg id="reasonsChart" class="chart" viewBox="0 0 900 220"></svg>
+  <div class="tablewrap"><table id="reasonsTable"><thead><tr><th>Reason</th><th>Count</th></tr></thead><tbody></tbody></table></div>
+</div>
+
+<div class="panel" id="nearbyPanel" hidden>
+  <div class="panel-head">
+    <h2>Nearby APs on your channel</h2>
+    <span class="pill muted" id="nearbyWhen"></span>
+  </div>
+  <p style="font-size:12px;color:var(--muted);margin:0 0 10px">
+    This counts other networks seen on your own channel at the last scan — it isn't a full per-channel survey yet, so it can tell you the channel is busy but not which one to switch to. That's on the list for a future build.
+  </p>
+  <div class="tablewrap"><table id="nearbyTable"><thead><tr><th>SSID</th><th>BSSID</th><th>RSSI</th><th>Channel</th></tr></thead><tbody></tbody></table></div>
+</div>
+
+<div class="panel" id="channelPanel" hidden>
+  <div class="panel-head">
+    <h2>Channel survey</h2>
+    <span class="pill good" id="channelRecommend"></span>
+  </div>
+  <div class="legend" style="margin-bottom:8px"><span>* current channel</span><span>&#9733; lowest overlap-weighted score</span><span>&#9675; nearby AP seen on that channel</span></div>
+  <svg id="channelChart" class="chart" viewBox="0 0 900 220"></svg>
+  <p style="font-size:12px;color:var(--muted);margin:10px 0 0">
+    Counts other visible Wi-Fi networks per channel (above -80dBm) from this device's position at scan time — not traffic volume, not non-Wi-Fi interference, and 2.4GHz only: a 5GHz network, even from the same router, is invisible to this scan. The bars above are the raw, unweighted count per channel; the recommended channel (firmware Build 9b+) is picked using an adjacent-channel-overlap-weighted score instead — a 20MHz-wide channel's real airtime is affected by neighbors even when nothing sits exactly on it, so each candidate channel (1/6/11) sums every channel's count scaled by a triangular weight that's strongest at zero channel-separation and fades to nothing by 5 channels apart, the same-shaped kernel just centered differently per candidate — which is why the recommended channel can differ from whichever bar looks shortest. (An earlier firmware build, 9a, scored this with three differently-sized flat windows instead, which under- or over-counted channel 11 relative to channel 1 regardless of actual noise — logs from that build used the same CHANNEL_SURVEY format, so this panel reads them fine, just know the recommended value in an old 9a log may not match what 9b would have picked from the same raw counts.) If your AP is on Auto/ACS channel selection, its own controller sees far more (airtime utilization, sometimes spectrum-level interference, a fixed antenna position) and its channel choice should generally be trusted over this reading — treat this panel as a local snapshot, not a recommendation to override it. Needs firmware Build 7.1 or later; older logs won't have this panel. The small circles above a bar mark nearby APs seen on that channel at the latest nearby-AP scan (below) — that scan and this channel survey are logged independently and aren't guaranteed to be from the same moment, so treat the overlap as approximate.
+  </p>
+</div>
+
+<div class="panel" id="walkPanel" hidden>
+  <div class="panel-head"><h2>Mode 2 &middot; Zone comparison</h2></div>
+  <svg id="zoneChart" class="chart" viewBox="0 0 900 220"></svg>
+  <div class="tablewrap" style="margin-top:12px"><table id="zoneTable"><thead><tr><th>Zone</th><th>Avg RSSI</th><th>Samples</th></tr></thead><tbody></tbody></table></div>
+</div>
+
+<div class="panel" id="surveyPanel" hidden>
+  <div class="panel-head">
+    <h2>Mode 1 &middot; Floor plan survey</h2>
+    <div class="surveyToggle" id="surveyToggle">
+      <button type="button" id="viewHeatmapBtn">Heatmap</button>
+      <button type="button" id="viewPointsBtn">Points</button>
+    </div>
+  </div>
+  <div class="mapwrap" id="mapWrap"><div class="mapempty">Add the matching floor-plan JPEG above to plot points on it — showing raw coordinates for now.</div></div>
+  <div class="heatLegend" id="heatLegend" hidden>
+    <span>-90 dBm</span><div class="bar"></div><span>-40 dBm</span>
+  </div>
+  <p id="heatmapNote" style="font-size:12px;color:var(--muted);margin:8px 0 0" hidden></p>
+</div>
+
+<div class="panel" id="conclusionPanel" hidden>
+  <div class="panel-head">
+    <h2>Conclusion</h2>
+    <span class="pill" id="conclusionVerdict"></span>
+  </div>
+  <div id="conclusionBody"></div>
+</div>
+
+<footer>Everything above runs in your browser — no file leaves this page.</footer>
+
+<script>
+"use strict";
+
+/* ---------- CSV parsing: Build 9b firmware quotes any free-text field
+   (recommendation, target_ssid, floorplan) that contains a comma, quote,
+   or newline, per standard CSV escaping -- doubling any internal quote.
+   recommendation sits before target_ssid/gateway_ping_ms in the monitor/
+   walk logs, so a comma there isn't necessarily in the last column.
+   target_ssid in particular is NOT device-chosen text -- it's whatever a
+   nearby access point is broadcasting as its SSID, which is attacker-
+   controlled input from this parser's point of view. A crafted SSID can
+   contain a comma, a quote, or even a literal newline byte, and the
+   firmware's own csvEscape() already quotes a field in all three cases
+   -- so the parser needs to actually honor that quoting across the WHOLE
+   file, not just within one pre-split line. The previous version of this
+   parser split the file into lines with a plain /\r?\n/ BEFORE doing any
+   quote-aware parsing, which tore a quoted-and-genuinely-multiline field
+   into two broken records -- the code and its own comment disagreed.
+   Replaced with a single pass over the entire file: a newline only ends
+   a record when it's not inside a quoted span; commas only end a field
+   under the same condition; a doubled quote inside a quoted span
+   unescapes to one literal quote. Logs from older, pre-9b firmware (no
+   quoting at all) still parse fine through the same code -- a field with
+   no quote characters in it just passes through unchanged, newlines
+   included (there weren't any to begin with). ---------- */
+function parseCSVRecords(text){
+  const records = [];
+  const quoteIssueFlags = [];   // parallel to records[]: true if THIS record had invalid quoting somewhere
+  let fields = [];
+  let cur = "";
+  let inQuotes = false;
+  // fieldHasContent: has the field being built received ANY character
+  // yet (including an opening quote)? Per RFC4180, a quote only starts a
+  // real quoted span as a field's very FIRST character -- a quote
+  // appearing after other characters is not valid CSV quoting.
+  let fieldHasContent = false;
+  // afterClosingQuote: just closed a quoted span; the only valid next
+  // characters are a comma, a line ending, or EOF. Anything else is
+  // trailing garbage after the closing quote -- also invalid.
+  let afterClosingQuote = false;
+  let recordHadQuoteIssue = false;
+  let sawAnyContent = false;
+  const endField = () => { fields.push(cur); cur = ""; fieldHasContent = false; afterClosingQuote = false; };
+  const endRecord = () => {
+    endField();
+    if (fields.some(f => f.length > 0) || fields.length > 1) { records.push(fields); quoteIssueFlags.push(recordHadQuoteIssue); }
+    fields = [];
+    recordHadQuoteIssue = false;
+  };
+  for (let i = 0; i < text.length; i++){
+    const c = text[i];
+    sawAnyContent = true;
+
+    if (inQuotes){
+      if (c === '"'){
+        if (text[i+1] === '"'){ cur += '"'; i++; }
+        else { inQuotes = false; afterClosingQuote = true; }
+      } else {
+        cur += c;   // includes a literal \n or \r while inside a quoted span -- that's the whole point of the multiline-field fix
+      }
+      continue;
+    }
+
+    if (afterClosingQuote){
+      if (c === ','){ endField(); continue; }
+      if (c === '\r'){ if (text[i+1] !== '\n') endRecord(); continue; }
+      if (c === '\n'){ endRecord(); continue; }
+      // Trailing characters right after a closing quote, before the
+      // next delimiter/line-ending -- e.g. `"abc"def,...`. Not valid
+      // CSV, but kept as best-effort literal content (appended, not
+      // dropped) rather than silently absorbed as if it were normal --
+      // flagged on the record so the caller can report it separately
+      // from a plain field-count mismatch.
+      recordHadQuoteIssue = true;
+      cur += c;
+      fieldHasContent = true;
+      afterClosingQuote = false;
+      continue;
+    }
+
+    if (c === '"'){
+      if (!fieldHasContent){
+        inQuotes = true;
+        fieldHasContent = true;
+      } else {
+        // A quote partway through an already-started, unquoted field --
+        // e.g. `abc"def,...`. Not a valid quoted-field start by
+        // RFC4180's own rule (first character only), so treated as a
+        // literal character rather than (re-)entering quote mode. That
+        // matters: the old code entered quote mode here regardless of
+        // position, which could swallow everything up to the NEXT quote
+        // in the whole file -- including commas and newlines -- into
+        // one field. Flagged so this is reported, not silently guessed at.
+        recordHadQuoteIssue = true;
+        cur += c;
+      }
+      continue;
+    }
+    if (c === ','){ endField(); continue; }
+    if (c === '\r'){
+      // \r\n: swallow the \r here and let the \n that follows end the
+      // record, so it isn't ended twice. A BARE \r with no following \n
+      // (old classic-Mac-style line endings) has no \n coming to do that
+      // job, so it has to end the record itself right here -- treating
+      // it as a no-op in that case would merge that row into the next
+      // one, which is exactly the bug this used to have despite the
+      // comment implying bare \r was already handled.
+      if (text[i+1] !== '\n') endRecord();
+      continue;
+    }
+    if (c === '\n'){ endRecord(); continue; }
+    cur += c;
+    fieldHasContent = true;
+  }
+  // Final record if the file didn't end with a trailing newline.
+  if (cur.length > 0 || fields.length > 0) endRecord();
+  if (!sawAnyContent) return { records: [], quoteIssueFlags: [], unterminatedQuote: false };
+  // If the file ends while still inside a quoted span, there's no
+  // matching closing quote anywhere in it -- everything from that
+  // opening quote to EOF (commas, newlines and all) was swallowed into
+  // one field above rather than parsed as the separate records/fields
+  // it was probably meant to be. That's not a value to silently accept;
+  // flag it so the caller can tell the user this file is malformed
+  // rather than just rendering whatever garbage came out of it.
+  return { records, quoteIssueFlags, unterminatedQuote: inQuotes };
+}
+function parseCSV(text){
+  const { records, quoteIssueFlags, unterminatedQuote } = parseCSVRecords(text);
+  if (!records.length) return null;
+  const header = records[0];   // header is always the fixed literal column names -- never quoted, never contains a comma
+  const nCols = header.length;
+  let malformedRowCount = 0;
+  let malformedQuoteRowCount = 0;
+  const rows = records.slice(1).map((fields, i) => {
+    if (fields.length !== nCols) malformedRowCount++;   // too few (truncated write) or too many (unexpected extra field) -- either way, not what this file's own header promised
+    if (quoteIssueFlags[i+1]) malformedQuoteRowCount++;   // +1 to skip the header's own flag -- reported SEPARATELY from the field-count mismatch above: a row can have invalid quoting and still happen to land on the right field count, or vice versa
+    const out = fields.slice(0, nCols);
+    while (out.length < nCols) out.push("");   // pad short rows rather than misaligning every column after them; the count above is what actually surfaces this to the user
+    return out;
+  });
+  return { header, rows, malformedRowCount, malformedQuoteRowCount, unterminatedQuote };
+}
+
+const SIGS = {
+  monitor: "sequence,storage,timestamp,event,rssi_dbm,recommendation",
+  walk:    "sequence,storage,event,zone,timestamp,rssi_dbm,avg_rssi_dbm,recommendation",
+  survey:  "sequence,storage,floorplan,x_percent,y_percent,img_x,img_y,timestamp,rssi_dbm",
+  // /boot_log.csv (Build 8.1+) -- written once per boot, in setup(),
+  // before any mode is even chosen; a device-wide boot history, not a
+  // survey session's data, so it's its own bucket (state.boot) rather
+  // than folded into the monitor log it otherwise resembles.
+  boot:    "sequence,storage,timestamp,reset_reason_code,reset_reason_label",
+};
+function detectType(header){
+  // Match the required base columns, but don't demand an exact header
+  // length: firmware builds since 8a/8b appended target_ssid and
+  // gateway_ping_ms onto the end of these same CSVs, and a strict
+  // equality check here silently dropped every log with those extra
+  // columns (looked like nothing uploaded at all, with no error).
+  // Matching "starts with the known prefix" keeps old logs working and
+  // doesn't break again the next time a column gets appended.
+  const sig = header.join(",");
+  for (const [k,v] of Object.entries(SIGS)) {
+    if (sig === v || sig.startsWith(v + ",")) return k;
+  }
+  return null;
+}
+function rowsToObjects(header, rows){
+  return rows.map(r => { const o = {}; header.forEach((h,i)=>o[h]=r[i]); return o; });
+}
+
+/* ---------- time parsing: real RTC timestamps ("YYYY-MM-DD HH:MM:SS"), or
+   the no-RTC fallback ("T+123s") which is still monotonic, just relative.
+   NOT guaranteed UTC: the firmware's RTC is only corrected to UTC via NTP
+   once Mode 3 gets a live connection (syncRtcFromNtp()) -- before that
+   first correction in a given boot, it's either whatever a previous
+   boot's NTP sync left it at (likely UTC, if that happened at some
+   point) or, on a dead/missing coin-cell backup, the firmware's own
+   compile-time seed, which reflects whatever clock/timezone the machine
+   that compiled it happened to be set to -- not necessarily UTC and not
+   necessarily the viewer's local time either. Forcing a "Z" suffix here
+   used to bake in a UTC assumption this parser has no way to actually
+   verify, and then displaying that through toLocaleString() compounded
+   it with an unrelated UTC->viewer's-local-timezone conversion on top.
+   Parsed WITHOUT a forced offset instead: Date.parse on a bare
+   "YYYY-MM-DDTHH:MM:SS" is interpreted in the browser's own local
+   timezone, which is an arbitrary but internally CONSISTENT choice --
+   fine for duration/ordering math (a subtraction cancels out whatever
+   the offset actually is), and displayed values are shown as the
+   device's own logged time ("device time"), not asserted to be the
+   viewer's local time or definitively UTC. See the readouts panel's
+   caveat text. ---------- */
+function parseTime(s){
+  if (!s) return null;
+  if (s.startsWith("T+")){
+    const n = parseFloat(s.slice(2));
+    // Number.isFinite rather than !isNaN -- isNaN(Infinity) is false, so
+    // a malformed "T+Infinity" would otherwise parse to a usable-looking
+    // ms value and enter the timeline/chart math.
+    return Number.isFinite(n) ? { ms: n*1000, relative: true } : null;
+  }
+  const t = Date.parse(s.replace(" ", "T"));
+  return isNaN(t) ? null : { ms: t, relative: false };
+}
+
+/* ---------- HTML escaping: applied to every value that originates from
+   an uploaded CSV before it's interpolated into any innerHTML/SVG string
+   anywhere in this file. target_ssid and the nearby-AP SSID/BSSID fields
+   in particular are NOT device-controlled -- they're whatever a nearby
+   access point is broadcasting, which anyone within radio range can set
+   to arbitrary text (including markup). Escaping only "<", as a couple
+   of spots in this file used to, is not a complete fix -- "&", '"', "'"
+   and ">" all still open paths to break out of the surrounding markup or
+   an attribute, depending on context. Wherever a cell is a single plain
+   value, building it via createElement+textContent (done directly, no
+   helper needed) is used instead of this -- that's strictly safer by
+   construction. This helper is for the remaining spots where a value is
+   spliced into a larger hand-built HTML/SVG string alongside real markup
+   (the conclusion's bullet text, SVG <text> labels). ---------- */
+function escapeHtml(s){
+  return String(s)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function rssiColor(rssi){
+  if (rssi >= -60) return "var(--good)";
+  if (rssi >= -75) return "var(--warn)";
+  return "var(--bad)";
+}
+function rssiBand(rssi){
+  if (rssi >= -60) return "good";
+  if (rssi >= -75) return "warn";
+  return "bad";
+}
+
+// Shared floor-plan survey-point validity check, used everywhere a
+// survey row is filtered before plotting/averaging (renderSurvey's
+// points/heatmap and renderConclusion's summary) -- a tap can only be a
+// real point on the plan if BOTH axes are numeric and within the 0-100%
+// range the UI actually taps in, not just x_percent and rssi_dbm as the
+// code used to check (y_percent went completely unvalidated). Uses
+// Number.isFinite rather than !isNaN for all three -- isNaN(Infinity) is
+// false, so parseFloat("Infinity") would otherwise sail through (the
+// 0-100 bound already catches an infinite x/y, but rssi_dbm had no bound
+// to catch it with).
+function isValidSurveyPoint(r){
+  const x = parseFloat(r.x_percent), y = parseFloat(r.y_percent), v = parseFloat(r.rssi_dbm);
+  const inPct = n => Number.isFinite(n) && n >= 0 && n <= 100;
+  return inPct(x) && inPct(y) && Number.isFinite(v);
+}
+
+/* ---------- RSSI -> continuous color, for the heatmap only. Reuses the
+   same three status hues already used everywhere else in this report
+   (good/warn/bad), just blended smoothly between them instead of banded,
+   so the heatmap sits visually consistent with the rest of the page
+   rather than introducing a separate sequential ramp. ---------- */
+const HEAT_STOPS = [
+  [-95, [217, 54, 54]],   // --bad
+  [-75, [185, 121, 10]],  // --warn
+  [-55, [31, 157, 85]],   // --good
+];
+function rssiToRGB(rssi){
+  const v = Math.max(HEAT_STOPS[0][0], Math.min(HEAT_STOPS[HEAT_STOPS.length-1][0], rssi));
+  for (let i = 0; i < HEAT_STOPS.length - 1; i++){
+    const [a, ca] = HEAT_STOPS[i], [b, cb] = HEAT_STOPS[i+1];
+    if (v >= a && v <= b){
+      const t = (v - a) / (b - a);
+      return [
+        Math.round(ca[0] + (cb[0]-ca[0])*t),
+        Math.round(ca[1] + (cb[1]-ca[1])*t),
+        Math.round(ca[2] + (cb[2]-ca[2])*t),
+      ];
+    }
+  }
+  return HEAT_STOPS[HEAT_STOPS.length-1][1];
+}
+
+/* ---------- state ---------- */
+let state = { monitor: [], walk: [], survey: [], boot: [], floorplanURL: null, usingExample: true, surveyViewMode: "auto", unrecognizedFiles: [], unreadableFiles: [], malformedFiles: [] };
+
+/* ---------- Session splitting + gap detection (replaces the old
+   mergeAndGapCheck()). `sequence` is a per-boot counter -- it resets to 1
+   every time the device powers on (see the firmware's own README note),
+   not a lifetime-unique id. The previous version of this function
+   treated it as one continuous space across the whole upload, de-duping
+   into a single Map keyed only by the raw number -- upload logs from
+   more than one power cycle and two different boots' rows that happen
+   to share a sequence number silently collide, discarding whichever one
+   lost that race.
+
+   Fixed by detecting boot-session boundaries directly from the data:
+   within a single boot, sequence only ever increases through appends,
+   never resets or goes backward except at a genuine restart. Sorting
+   absolute-time rows by timestamp and then finding a sequence DECREASE
+   is used as the reboot signal for them, on the assumption that the RTC
+   keeps running (on its own coin-cell backup) and stays monotonic across
+   a reboot -- but that's an assumption, not a guarantee: the timestamp
+   documentation elsewhere in this file already warns the RTC can be
+   corrected by NTP mid-stream, drift, or start from a bad compile-time
+   seed, any of which can make it jump. A jump the sequence numbers don't
+   agree with would make this heuristic infer the wrong boundary, or miss
+   one, for that stretch -- so rather than silently trusting the sort,
+   there's a direct, cheap check below for exactly that disagreement
+   before the sort happens (which would otherwise hide it), and it's
+   surfaced to the user rather than acted on silently. De-dup and gap
+   detection then both happen WITHIN one session, where sequence really
+   is unique and continuous, never across a session boundary. ---------- */
+function splitIntoSessions(rowsA){
+  const withSeq = rowsA.map(r => ({ row: r, seq: parseInt(r.sequence, 10), t: parseTime(r.timestamp) }));
+  const timed = withSeq.filter(r => r.t && !r.t.relative && !isNaN(r.seq));
+  const relative = withSeq.filter(r => r.t && r.t.relative && !isNaN(r.seq));
+  const untimedRowCount = withSeq.length - timed.length - relative.length;
+
+  // Consistency check, done in UPLOAD order (append order) BEFORE the
+  // sort below reorders anything: within what should be one boot
+  // (sequence increasing, i.e. NOT a reset), the timestamp should never
+  // go backward. If it does, the RTC jumped independently of any reboot
+  // sequence saw -- a real sign the sort-by-time-then-find-a-reset
+  // heuristic below may be inferring the wrong session boundary (or
+  // missing one) for that stretch, surfaced to the caller rather than
+  // silently trusted.
+  let timestampOrderAmbiguous = false;
+  for (let i = 1; i < timed.length; i++){
+    if (timed[i].seq > timed[i-1].seq && timed[i].t.ms < timed[i-1].t.ms){
+      timestampOrderAmbiguous = true;
+      break;
+    }
+  }
+
+  // Absolute-time rows: sort by actual timestamp -- the RTC is assumed
+  // to be one real shared clock across a reboot (unlike sequence, which
+  // resets), per the caveat above.
+  timed.sort((a,b) => a.t.ms - b.t.ms || a.seq - b.seq);
+  // Relative ("T+", no RTC available that boot) rows have no shared
+  // clock across boots at all -- a "T+120s" from one boot and a
+  // "T+120s" from an unrelated boot are not the same moment, just
+  // coincidentally equal numbers. Left in upload order (the only
+  // ordering available) and never interleaved with the absolute-time
+  // rows or with each other on one timeline.
+
+  function splitRunsBySequenceReset(list){
+    const sessions = [];
+    let current = null, prevSeq = null;
+    list.forEach(entry => {
+      if (current === null || entry.seq < prevSeq){
+        current = [];
+        sessions.push(current);
+      }
+      current.push(entry);
+      prevSeq = entry.seq;
+    });
+    return sessions;
+  }
+
+  function dedupAndGaps(session){
+    // Sequence is reliably unique and monotonic within one session, so
+    // the Map-by-sequence approach the old code used globally is correct
+    // again here -- just scoped to one boot's worth of rows rather than
+    // the whole upload.
+    const bySeq = new Map();
+    session.forEach(entry => bySeq.set(entry.seq, entry.row));
+    const seqs = Array.from(bySeq.keys()).sort((a,b)=>a-b);
+    const gaps = [];
+    for (let i=1;i<seqs.length;i++){
+      if (seqs[i] - seqs[i-1] > 1) gaps.push([seqs[i-1], seqs[i]]);
+    }
+    return { rows: seqs.map(s=>bySeq.get(s)), gaps };
+  }
+
+  const timedResults = splitRunsBySequenceReset(timed).map(dedupAndGaps);
+  const relativeResults = splitRunsBySequenceReset(relative).map(dedupAndGaps);
+  const gaps = [];
+  timedResults.forEach(s => gaps.push(...s.gaps));
+  relativeResults.forEach(s => gaps.push(...s.gaps));
+
+  return {
+    // Per-session row arrays (each already in that session's own
+    // chronological order) -- computeUptimeStats() needs these kept
+    // separate so a power-off gap between sessions never counts against
+    // uptime. `rows` is every row concatenated for panels that just want
+    // "all the rows" regardless of session (RSSI/zone/channel charts,
+    // sample counts, storage-type counts, etc) -- it's timed sessions
+    // THEN relative sessions, NOT one combined chronological ordering
+    // (timed and relative timestamps aren't on a shared clock to begin
+    // with, so there is no single correct interleaving). Any caller that
+    // cares about chronological order within what it reads must re-sort
+    // after picking timedSessions or relativeSessions, the way
+    // renderMonitor()/renderConclusion() already do -- never rely on
+    // `rows` for that.
+    timedSessions: timedResults.map(s => s.rows),
+    relativeSessions: relativeResults.map(s => s.rows),
+    rows: [].concat(...timedResults.map(s=>s.rows), ...relativeResults.map(s=>s.rows)),
+    gaps,
+    sessionCount: timedResults.length + relativeResults.length,
+    untimedRowCount,
+    timestampOrderAmbiguous,
+  };
+}
+
+/* ---------- Builds the single ordered row list renderMonitor() and
+   renderConclusion() each display, from a splitIntoSessions() result.
+   This used to be done inline in both places as "concat every session,
+   then sort everything by r.t.ms" -- correct for absolute timestamps
+   (the RTC is one real shared clock across a reboot), but wrong for
+   relative ("T+", no RTC that boot) sessions: a "T+5s" from one boot and
+   a "T+10s" from an unrelated boot aren't 5 and 10 seconds into the same
+   timeline, so sorting them together can put a later boot's early event
+   before an earlier boot's later one, scrambling event order and which
+   scan/row ends up "latest".
+
+   Fixed by only doing that global sort when the sessions are absolute
+   (useTimed); for relative sessions, each session's own internal order
+   is already correct (dedupAndGaps sorts by sequence) and sessions are
+   kept in the order splitIntoSessions encountered them, never
+   re-ordered against each other by raw T+ value. Each row also gets a
+   `displayX`, an ever-increasing position to plot charts against: for
+   absolute sessions this is just the real timestamp; for relative
+   sessions it's a synthetic running position so a multi-session chart
+   still draws left-to-right without implying the sessions share a
+   clock (plotting raw T+ ms directly would fold the line back on itself
+   at every session boundary).
+
+   Only ONE category (timed or relative) is ever actually charted/listed
+   here -- there's no meaningful way to put an absolute clock and a
+   per-boot relative clock on one shared axis. If the OTHER category also
+   has rows (e.g. the device logged a while with no RTC, then later boots
+   got NTP-synced, all in one upload), those rows are real data that
+   still needs to be accounted for somewhere rather than just vanishing
+   from the chart/table with no indication -- callers surface
+   otherRowCount/otherSessionCount/otherCategory/otherRows so the UI can
+   say so and compute separate figures (uptime, average RSSI, etc) for
+   them, on the SAME policy everywhere this is used: every panel that
+   reports a headline number from "the" rows uses display.rows (the
+   primary category) for it, and an explicitly-labeled secondary number
+   from otherRows when the other category also has data -- never a
+   blended figure from both at once, and never two panels disagreeing by
+   silently picking different row sets for what's nominally the same
+   number (see renderReadouts()/renderConclusion()). ---------- */
+function buildDisplayRows(split){
+  const useTimed = split.timedSessions.length > 0;
+  const primaryGroups = useTimed ? split.timedSessions : split.relativeSessions;
+  const otherGroups = useTimed ? split.relativeSessions : split.timedSessions;
+  const rows = [];
+  let displayX = 0;
+  primaryGroups.forEach((session, sessionIndex) => {
+    session.forEach(r => {
+      const t = parseTime(r.timestamp);
+      if (!t) return;
+      rows.push({ ...r, t, sessionIndex, displayX: useTimed ? t.ms : displayX++ });
+    });
+  });
+  if (useTimed) rows.sort((a,b) => a.t.ms - b.t.ms);
+  const otherRows = [].concat(...otherGroups);   // flattened; order doesn't matter for an average/count, and these are never charted
+  return {
+    rows, relative: !useTimed, multiSession: primaryGroups.length > 1,
+    otherCategory: otherRows.length > 0 ? (useTimed ? "relative (\"T+\", no RTC)" : "absolute-time") : null,
+    otherRows, otherRowCount: otherRows.length, otherSessionCount: otherGroups.length,
+  };
+}
+
+/* ---------- Shared uptime/connection-interval calculation, used by both
+   renderReadouts() and renderConclusion() (which used to each carry
+   their own near-identical copy -- a drift risk on its own, and neither
+   defended against a missing row). Event semantics confirmed against
+   the actual firmware source: CONNECTED and RECONNECTED both open a
+   connected interval; DISCONNECTED closes whichever interval was open
+   and counts as one drop; CONNECTION_LOST is a pure ANNOTATION the
+   firmware logs only when an already-logged DISCONNECTED fails to
+   resolve within its grace period -- it never opens or closes an
+   interval itself, and treating it as if it did would double-count or
+   misattribute time. If a CONNECTED/RECONNECTED arrives while one is
+   already open, or a DISCONNECTED arrives with none open, the row that
+   should have been its counterpart is missing from the data -- rather
+   than silently guessing at that boundary, the result is flagged
+   `isEstimated` instead of presented as an exact figure. Computed PER
+   SESSION and summed, so time the device was powered off between
+   sessions is excluded from both the connected time and the total span
+   -- it was never "running but disconnected", it just wasn't running. */
+function computeUptimeStats(sessionRowArrays){
+  let connectedMs = 0, totalMs = 0, dropCount = 0, lostCount = 0;
+  let hadUnmatchedTransition = false, endedMidConnection = false, startedMidConnection = false;
+  let sessionsWithEvidence = 0, sessionsWithoutEvidence = 0;
+
+  sessionRowArrays.forEach(rows => {
+    const timed = rows.map(r => ({...r, t: parseTime(r.timestamp)})).filter(r => r.t);
+    if (!timed.length) return;
+    timed.sort((a,b)=>a.t.ms-b.t.ms);
+
+    const firstConnRelated = timed.find(r => r.event === "CONNECTED" || r.event === "RECONNECTED" || r.event === "DISCONNECTED");
+    // A session with timestamped rows but NO connection-state event at all
+    // (e.g. only SAMPLE rows) has nothing to compute uptime FROM -- the
+    // old code still summed its timestamp span into totalMs with
+    // connectedMs left at 0, which reported a confident "0% uptime" that
+    // was really just "this log doesn't say". Excluded entirely instead,
+    // same as a session with no timed rows at all -- if every session
+    // turns out to be like this, totalMs stays 0 and uptimePct comes
+    // back null ("--"), not a false zero.
+    if (!firstConnRelated){ sessionsWithoutEvidence++; return; }
+    sessionsWithEvidence++;
+    if (firstConnRelated.event === "DISCONNECTED") startedMidConnection = true;
+
+    let lastUp = null;
+    timed.forEach(r => {
+      if (r.event === "CONNECTED" || r.event === "RECONNECTED"){
+        // Already open -- the DISCONNECTED that should have closed the
+        // prior interval is missing from the data. Keep the EARLIER
+        // lastUp rather than overwriting it: nothing in the data says
+        // the link ever actually dropped between the two, so treating
+        // the whole span as connected is a smaller assumption than
+        // silently discarding it from both connectedMs and downtime.
+        // Either way this is a gap in the data, so it's flagged.
+        if (lastUp !== null) { hadUnmatchedTransition = true; }
+        else { lastUp = r.t.ms; }
+      } else if (r.event === "DISCONNECTED"){
+        dropCount++;
+        if (lastUp !== null){
+          connectedMs += r.t.ms - lastUp;
+          lastUp = null;
+        } else {
+          hadUnmatchedTransition = true;   // closing an interval that was never (visibly) opened
+        }
+      } else if (r.event === "CONNECTION_LOST"){
+        lostCount++;   // annotation only -- never touches lastUp/connectedMs, see comment above
+      }
+    });
+
+    if (lastUp !== null){
+      connectedMs += timed[timed.length-1].t.ms - lastUp;
+      endedMidConnection = true;   // this session's log window closed (or was cut off) while still connected
+    }
+    if (timed.length > 1) totalMs += timed[timed.length-1].t.ms - timed[0].t.ms;
+  });
+
+  const uptimePct = totalMs > 0 ? (100 * connectedMs / totalMs) : null;
+  return {
+    connectedMs, totalMs, dropCount, lostCount, uptimePct,
+    isEstimated: hadUnmatchedTransition || endedMidConnection || startedMidConnection,
+    sessionsWithEvidence, sessionsWithoutEvidence,
+  };
+}
+
+/* Sibling to computeUptimeStats(): same event semantics (a duplicate
+   CONNECTED/RECONNECTED while already up, or a DISCONNECTED while already
+   down, is ignored rather than opening/closing a new interval -- it's
+   flagged over there via isEstimated, not re-flagged here), but returns the
+   actual {start,end,state} segments per session instead of just totals, for
+   drawing a timeline rather than a single percentage. state is "up",
+   "down", or "unknown" (before any connection-state evidence has been
+   seen -- the span could be either). */
+function computeSessionIntervals(sessionRowArrays){
+  return sessionRowArrays.map(rows => {
+    const timed = rows.map(r => ({...r, t: parseTime(r.timestamp)})).filter(r => r.t);
+    if (!timed.length) return { hasData: false, hasEvidence: false, segments: [], ticks: [], startMs: null, endMs: null };
+    timed.sort((a,b)=>a.t.ms-b.t.ms);
+    const startMs = timed[0].t.ms, endMs = timed[timed.length-1].t.ms;
+    const ticks = timed.filter(r => r.event === "DISCONNECTED").map(r => r.t.ms);
+    // Build 9b follow-up: same tick mechanism as DISCONNECTED above, for
+    // the two event types that used to only show up as events-table text
+    // (see renderConclusion()'s own comment on the same gap) -- drawn as
+    // small markers rather than full-height lines so they read as
+    // secondary to the connect/disconnect state the bar's fill already
+    // shows.
+    const syncTicks = timed.filter(r => r.event === "TIME_SYNC").map(r => r.t.ms);
+    const missedTicks = timed.filter(r => r.event === "MISSED_EVENTS").map(r => r.t.ms);
+    const hasEvidence = timed.some(r => r.event === "CONNECTED" || r.event === "RECONNECTED" || r.event === "DISCONNECTED");
+    if (!hasEvidence){
+      return { hasData: true, hasEvidence: false, segments: [{ start: startMs, end: endMs, state: "unknown" }], ticks, syncTicks, missedTicks, startMs, endMs };
+    }
+
+    const segments = [];
+    let connected = null;   // null = not yet known
+    let segStart = startMs;
+    timed.forEach(r => {
+      if (r.event === "CONNECTED" || r.event === "RECONNECTED"){
+        if (connected !== true){
+          if (r.t.ms > segStart) segments.push({ start: segStart, end: r.t.ms, state: connected === null ? "unknown" : "down" });
+          connected = true; segStart = r.t.ms;
+        }
+      } else if (r.event === "DISCONNECTED"){
+        if (connected !== false){
+          if (r.t.ms > segStart) segments.push({ start: segStart, end: r.t.ms, state: connected === null ? "unknown" : "up" });
+          connected = false; segStart = r.t.ms;
+        }
+      }
+    });
+    if (endMs > segStart) segments.push({ start: segStart, end: endMs, state: connected ? "up" : "down" });
+    return { hasData: true, hasEvidence: true, segments, ticks, syncTicks, missedTicks, startMs, endMs };
+  });
+}
+
+/* Equal-width "small multiples" facet per session -- NOT time-scaled across
+   sessions (a short session next to a long power-off gap would otherwise
+   collapse to an unreadable sliver), so a gap's width says nothing about
+   how long the device was actually off, only that it was. Within one
+   session's block, segments ARE scaled to that session's own duration. */
+function connectionTimelineSVG(sessionIntervals){
+  const w = 900, h = 54, pad = { l: 4, r: 4, t: 4, b: 14 };
+  const sessions = sessionIntervals.map((s,i) => ({ ...s, idx: i })).filter(s => s.hasData);
+  if (!sessions.length) return `<text x="20" y="28" font-size="12">No timed connection data to chart.</text>`;
+  const gap = sessions.length > 1 ? 6 : 0;
+  const blockW = Math.max(6, (w - pad.l - pad.r - gap*(sessions.length-1)) / sessions.length);
+  const barY = pad.t, barH = h - pad.t - pad.b;
+  let out = "", x = pad.l;
+  sessions.forEach(s => {
+    const span = Math.max(1, s.endMs - s.startMs);
+    const Xp = ms => x + (ms - s.startMs) / span * blockW;
+    out += `<g><title>Session ${s.idx+1} — ${s.hasEvidence ? "connection evidence present" : "no connection events logged"}</title>`;
+    out += `<rect x="${x.toFixed(1)}" y="${barY}" width="${blockW.toFixed(1)}" height="${barH}" rx="2" fill="var(--muted)" opacity=".18"/>`;
+    s.segments.forEach(seg => {
+      if (seg.end <= seg.start) return;
+      const sx = Xp(seg.start), sw = Math.max(0.6, Xp(seg.end)-Xp(seg.start));
+      const fill = seg.state === "up" ? "var(--good)" : seg.state === "down" ? "var(--bad)" : "var(--muted)";
+      const op = seg.state === "unknown" ? ".35" : ".85";
+      const label = seg.state === "up" ? "Connected" : seg.state === "down" ? "Disconnected" : "No evidence";
+      out += `<rect x="${sx.toFixed(1)}" y="${barY}" width="${sw.toFixed(1)}" height="${barH}" fill="${fill}" opacity="${op}"><title>${label} for ${Math.round((seg.end-seg.start)/1000)}s</title></rect>`;
+    });
+    s.ticks.forEach(ms => {
+      const tx = Xp(ms);
+      out += `<line x1="${tx.toFixed(1)}" x2="${tx.toFixed(1)}" y1="${barY-2}" y2="${barY+barH+2}" stroke="var(--fg)" stroke-width="1"><title>Disconnect event</title></line>`;
+    });
+    // Build 9b follow-up: small diamond markers above the bar, distinct
+    // from the full-height DISCONNECTED tick above -- secondary to the
+    // connect/disconnect fill, not another state it's drawn in.
+    (s.syncTicks||[]).forEach(ms => {
+      const tx = Xp(ms);
+      out += `<rect x="${(tx-2.5).toFixed(1)}" y="${(barY-2.5).toFixed(1)}" width="5" height="5" fill="var(--accent)" transform="rotate(45 ${tx.toFixed(1)} ${barY.toFixed(1)})"><title>Clock corrected from NTP</title></rect>`;
+    });
+    (s.missedTicks||[]).forEach(ms => {
+      const tx = Xp(ms);
+      out += `<rect x="${(tx-2.5).toFixed(1)}" y="${(barY-2.5).toFixed(1)}" width="5" height="5" fill="var(--warn)" transform="rotate(45 ${tx.toFixed(1)} ${barY.toFixed(1)})"><title>Event(s) dropped -- internal queue was full</title></rect>`;
+    });
+    if (blockW >= 14) out += `<text x="${(x+blockW/2).toFixed(1)}" y="${h-2}" font-size="9" text-anchor="middle" fill="var(--muted)">${s.idx+1}</text>`;
+    out += `</g>`;
+    x += blockW + gap;
+  });
+  return out;
+}
+
+function render(){
+  const { monitor, walk, survey, boot } = state;
+
+  document.getElementById("exampleBanner").hidden = !state.usingExample;
+
+  renderReadouts();
+  renderMonitor(monitor);
+  renderBoot(boot);
+  renderWalk(walk);
+  renderSurvey(survey);
+  renderConclusion();
+}
+
+function renderReadouts(){
+  const box = document.getElementById("readouts");
+  box.innerHTML = "";
+  const monitor = state.monitor;
+  if (!monitor.length){ return; }
+
+  const split = splitIntoSessions(monitor);
+  const display = buildDisplayRows(split);
+  const gapBanner = document.getElementById("gapBanner");
+  const notes = [];
+  if (split.gaps.length){
+    const missing = split.gaps.reduce((n,[a,b])=>n+(b-a-1),0);
+    notes.push(`${missing} log row(s) may be missing within a session (sequence gap${split.gaps.length>1?"s":""}) — likely a dropped write, or only one of the SD/FFat copies was uploaded. (The sequence counter is shared across Modes 1–3, so a gap can also just mean those numbers were used by a different mode's log in the same session, not necessarily lost data here.)`);
+  }
+  if (split.sessionCount > 1){
+    notes.push(`This data spans ${split.sessionCount} separate power-on sessions — uptime below is calculated per session and summed, so time the device was powered off between them isn't counted as downtime.`);
+  }
+  if (split.untimedRowCount > 0){
+    notes.push(`${split.untimedRowCount} row(s) had an unreadable sequence number or timestamp and were excluded from this analysis.`);
+  }
+  if (split.timestampOrderAmbiguous){
+    notes.push(`This log's timestamps go backward somewhere without a matching sequence-number reset — the device clock may have jumped (NTP resync, drift, or a bad seed). Session/reboot boundaries below are inferred from sequence and timestamp order and may not reflect the real one where that happened.`);
+  }
+  if (display.otherRowCount > 0){
+    notes.push(`${display.otherRowCount} row(s) across ${display.otherSessionCount} session(s) use ${display.otherCategory} timestamps and aren't included in the chart/events table below (which only shows the ${display.relative ? "relative" : "absolute-time"} rows) — see the second Uptime tile for what those rows show.`);
+  }
+  if (notes.length){
+    gapBanner.hidden = false;
+    gapBanner.textContent = notes.join(" ");
+  } else {
+    gapBanner.hidden = true;
+  }
+  // Avg RSSI now comes from display.rows (the SAME primary-category rows
+  // renderMonitor()/renderConclusion() use), not split.rows (which always
+  // concatenates BOTH timed and relative rows together). Those used to
+  // disagree whenever an upload mixed timestamp formats -- this readout
+  // tile and the written conclusion could silently report two different
+  // averages for the same upload. A secondary, labeled figure for the
+  // other category follows the same rule the Uptime tile above already
+  // uses: shown separately when it exists, never blended into the first.
+  const rows = display.rows;
+
+  const samples = rows.filter(r => r.event === "SAMPLE" && r.rssi_dbm !== "1" && Number.isFinite(parseFloat(r.rssi_dbm)));
+  const avgRssi = samples.length ? samples.reduce((s,r)=>s+parseFloat(r.rssi_dbm),0)/samples.length : null;
+  const otherSamples = display.otherRows.filter(r => r.event === "SAMPLE" && r.rssi_dbm !== "1" && Number.isFinite(parseFloat(r.rssi_dbm)));
+  const otherAvgRssi = otherSamples.length ? otherSamples.reduce((s,r)=>s+parseFloat(r.rssi_dbm),0)/otherSamples.length : null;
+
+  // Same precedence as renderMonitor()/renderConclusion(): prefer
+  // absolute-time sessions, only fall back to relative ("T+") ones if
+  // there are no timed sessions at all. Using split.timedSessions alone
+  // here meant a log with no RTC/NTP sync yet (all-relative) silently
+  // showed "--" for uptime in this readout tile while the Monitor and
+  // Conclusion panels, which already had this fallback, still computed
+  // one from the same upload -- an inconsistency, not a deliberate choice.
+  const useTimedForUptime = split.timedSessions.length > 0;
+  const uptimeSessions = useTimedForUptime ? split.timedSessions : split.relativeSessions;
+  const uptime = computeUptimeStats(uptimeSessions);
+  // Session boundaries for TIMED sessions come from sorting by timestamp
+  // and finding a sequence reset -- if timestampOrderAmbiguous caught a
+  // disagreement between those two, that boundary-finding may itself be
+  // wrong, which means this uptime figure (computed per-session) can't
+  // be presented as exact either. Folded into isEstimated rather than a
+  // separate flag the readout tile would otherwise ignore.
+  if (useTimedForUptime && split.timestampOrderAmbiguous) uptime.isEstimated = true;
+  // The other category's sessions (if any) get their OWN independent
+  // uptime figure rather than being dropped -- never blended with the
+  // primary one, since the two aren't on the same clock.
+  const otherUptimeSessions = useTimedForUptime ? split.relativeSessions : split.timedSessions;
+  const otherUptime = otherUptimeSessions.length ? computeUptimeStats(otherUptimeSessions) : null;
+  if (otherUptime && !useTimedForUptime && split.timestampOrderAmbiguous) otherUptime.isEstimated = true;
+
+  // Storage counts intentionally come from the RAW monitor array, not
+  // from `rows`/split.rows -- those have already been deduplicated by
+  // sequence number, and an SD copy and an FFAT copy of the very same
+  // boot share the same sequence numbers. Counting from the deduplicated
+  // rows meant uploading both copies of a log silently discarded one
+  // copy of every duplicated row before these counts were even taken,
+  // so they never reliably reflected what was actually uploaded.
+  const sdCount = monitor.filter(r=>r.storage==="SD").length;
+  const ffatCount = monitor.filter(r=>r.storage==="FFAT").length;
+
+  const readouts = [
+    ["Avg RSSI", avgRssi!==null ? Math.round(avgRssi)+" dBm" : "—", avgRssi!==null ? rssiBand(avgRssi) : ""],
+    ["Uptime", uptime.uptimePct!==null ? (uptime.isEstimated?"~":"")+uptime.uptimePct.toFixed(1)+"%" : "—", uptime.uptimePct!==null ? (uptime.uptimePct>98?"good":uptime.uptimePct>90?"warn":"bad") : ""],
+    ["Drops", String(uptime.dropCount), uptime.dropCount===0?"good":uptime.dropCount<5?"warn":"bad"],
+    ["Sustained losses", String(uptime.lostCount), uptime.lostCount===0?"good":"bad"],
+    ["Samples logged", String(samples.length), ""],
+    ["Storage", `${sdCount} SD / ${ffatCount} FFAT`, ""],
+  ];
+  if (otherUptime && otherUptime.uptimePct !== null){
+    readouts.push([
+      `Uptime (${useTimedForUptime ? "T+" : "absolute"} rows)`,
+      (otherUptime.isEstimated?"~":"")+otherUptime.uptimePct.toFixed(1)+"%",
+      otherUptime.uptimePct>98?"good":otherUptime.uptimePct>90?"warn":"bad",
+    ]);
+  }
+  if (otherAvgRssi !== null){
+    readouts.push([
+      `Avg RSSI (${display.relative ? "absolute" : "T+"} rows)`,
+      Math.round(otherAvgRssi)+" dBm",
+      rssiBand(otherAvgRssi),
+    ]);
+  }
+  readouts.forEach(([label,value,band])=>{
+    const el = document.createElement("div");
+    el.className = "readout";
+    const labelEl = document.createElement("div");
+    labelEl.className = "label";
+    labelEl.textContent = label;
+    const valueEl = document.createElement("div");
+    valueEl.className = "value" + (band ? " " + band : "");
+    valueEl.textContent = value;
+    el.appendChild(labelEl);
+    el.appendChild(valueEl);
+    // Tiny 2-segment bar under the Storage tile -- purely decorative
+    // (the exact counts are already stated as text above), so direct
+    // labeling via the title attribute is enough; no legend needed for
+    // a 2-category comparison that's already named in the value text.
+    if (label === "Storage" && (sdCount + ffatCount) > 0){
+      const bar = document.createElement("div");
+      bar.style.cssText = "display:flex;height:6px;border-radius:3px;overflow:hidden;margin-top:6px";
+      bar.title = `${sdCount} SD / ${ffatCount} FFAT`;
+      if (sdCount > 0){
+        const seg = document.createElement("div");
+        seg.style.cssText = `flex:${sdCount} 0 0;background:var(--accent)`;
+        bar.appendChild(seg);
+      }
+      if (ffatCount > 0){
+        const seg = document.createElement("div");
+        seg.style.cssText = `flex:${ffatCount} 0 0;background:var(--muted)`;
+        bar.appendChild(seg);
+      }
+      el.appendChild(bar);
+    }
+    box.appendChild(el);
+  });
+  if (uptime.isEstimated && uptime.uptimePct !== null){
+    const note = document.createElement("div");
+    note.style.cssText = "font-size:11px;color:var(--muted);grid-column:1/-1;margin-top:-2px";
+    // Matches computeUptimeStats()'s actual isEstimated conditions -- a
+    // CONNECTED/RECONNECTED or DISCONNECTED that should have had a
+    // counterpart is missing from the data, or the log begins/ends while
+    // already connected. A sequence gap and spanning multiple sessions
+    // are called out separately above (gapBanner) because neither one,
+    // by itself, actually makes computeUptimeStats()'s figure inexact.
+    note.textContent = "Uptime (~) is approximate — a connection event (CONNECTED/RECONNECTED/DISCONNECTED) appears to be missing from the log, or it begins or ends while already connected. Where a log ends still connected, uptime only counts through the last logged event -- it can't show whether the connection stayed up after logging stopped.";
+    box.appendChild(note);
+  }
+}
+
+function lineChartSVG(points, opts){
+  // points: [{x:ms, y:rssi}]. opts: {w,h,yMin,yMax,bands:boolean}
+  const w = opts.w||900, h = opts.h||220, pad = {l:44,r:14,t:14,b:26};
+  const yMin = opts.yMin ?? -95, yMax = opts.yMax ?? -20;
+  if (!points.length) return `<text x="20" y="40">No sample rows to chart.</text>`;
+  const xMin = points[0].x, xMax = points[points.length-1].x;
+  const xSpan = Math.max(1, xMax-xMin);
+  const X = v => pad.l + (v-xMin)/xSpan * (w-pad.l-pad.r);
+  const Y = v => pad.t + (1-(v-yMin)/(yMax-yMin)) * (h-pad.t-pad.b);
+
+  let bands = "";
+  if (opts.bands){
+    bands += `<rect x="${pad.l}" y="${Y(-60)}" width="${w-pad.l-pad.r}" height="${Y(yMax)>Y(-60)?0:Y(-60)-Y(yMax)}" fill="var(--good)" opacity=".06"/>`;
+    bands += `<rect x="${pad.l}" y="${Y(-75)}" width="${w-pad.l-pad.r}" height="${Y(-60)-Y(-75)}" fill="var(--warn)" opacity=".08"/>`;
+    bands += `<rect x="${pad.l}" y="${Y(yMin)}" width="${w-pad.l-pad.r}" height="${Y(-75)-Y(yMin)}" fill="var(--bad)" opacity=".06"/>`;
+  }
+
+  let grid = "";
+  for (let g = yMin; g <= yMax; g += 15){
+    grid += `<line class="grid" x1="${pad.l}" x2="${w-pad.r}" y1="${Y(g)}" y2="${Y(g)}"/>`;
+    grid += `<text x="4" y="${Y(g)+4}" font-size="11">${g}</text>`;
+  }
+
+  const path = points.map((p,i)=>`${i===0?"M":"L"}${X(p.x).toFixed(1)},${Y(p.y).toFixed(1)}`).join(" ");
+  const dots = points.map(p=>`<circle cx="${X(p.x).toFixed(1)}" cy="${Y(p.y).toFixed(1)}" r="2.2" fill="${rssiColor(p.y)}"/>`).join("");
+
+  return `${bands}${grid}
+    <line class="axis" x1="${pad.l}" x2="${w-pad.r}" y1="${h-pad.b}" y2="${h-pad.b}"/>
+    <path d="${path}" fill="none" stroke="var(--accent)" stroke-width="1.6"/>
+    ${dots}`;
+}
+
+// Build 9b follow-up: gateway_ping_ms is only ever populated on SAMPLE
+// rows (every other event in appendMonitorLogLine()'s call sites passes
+// an empty string for it), and the caller below already drops "TIMEOUT"
+// rows before building `points` -- a ping that timed out just leaves a
+// gap in the line here rather than drawing a false zero, the same
+// convention lineChartSVG() above already uses for RSSI's own
+// not-a-number sentinel. One series (ping over time), so per this
+// report's own color rules a single accent-colored line needs no legend
+// box -- the "Gateway ping" panel heading already names it. Y-axis is
+// NOT fixed like RSSI's dBm scale (there's no established "good/bad"
+// ping threshold in this firmware to band against), so it's scaled to
+// the data and rounded up to a friendly step instead.
+function pingChartSVG(points, opts){
+  const w = (opts&&opts.w)||900, h = (opts&&opts.h)||160, pad = {l:44,r:14,t:14,b:26};
+  if (!points.length) return `<text x="20" y="40">No numeric ping samples to chart (older logs may not have this column, or every sample timed out).</text>`;
+  const xMin = points[0].x, xMax = points[points.length-1].x;
+  const xSpan = Math.max(1, xMax-xMin);
+  const maxY = Math.max(...points.map(p=>p.y));
+  const step = maxY <= 50 ? 10 : maxY <= 100 ? 20 : maxY <= 250 ? 50 : 100;
+  const yMax = Math.max(step, Math.ceil((maxY*1.1) / step) * step);
+  const yMin = 0;
+  const X = v => pad.l + (v-xMin)/xSpan * (w-pad.l-pad.r);
+  const Y = v => pad.t + (1-(v-yMin)/(yMax-yMin)) * (h-pad.t-pad.b);
+
+  let grid = "";
+  for (let g = yMin; g <= yMax; g += step){
+    grid += `<line class="grid" x1="${pad.l}" x2="${w-pad.r}" y1="${Y(g)}" y2="${Y(g)}"/>`;
+    grid += `<text x="4" y="${Y(g)+4}" font-size="11">${g}</text>`;
+  }
+
+  const path = points.map((p,i)=>`${i===0?"M":"L"}${X(p.x).toFixed(1)},${Y(p.y).toFixed(1)}`).join(" ");
+  const dots = points.map(p=>`<circle cx="${X(p.x).toFixed(1)}" cy="${Y(p.y).toFixed(1)}" r="2.2" fill="var(--accent)"><title>${Math.round(p.y)} ms</title></circle>`).join("");
+
+  return `${grid}
+    <line class="axis" x1="${pad.l}" x2="${w-pad.r}" y1="${h-pad.b}" y2="${h-pad.b}"/>
+    <path d="${path}" fill="none" stroke="var(--accent)" stroke-width="1.6"/>
+    ${dots}`;
+}
+
+// Builds a <td> with plain text content -- the safe-by-construction way
+// to put a CSV-sourced value into a table cell, used everywhere below
+// instead of string-interpolating it into an innerHTML template. Several
+// of these values (SSID, BSSID) are NOT device-controlled -- they're
+// whatever a nearby access point broadcasts, which is attacker-reachable
+// input from this parser's point of view.
+function textCell(text, extraClass){
+  const td = document.createElement("td");
+  if (extraClass) td.className = extraClass;
+  td.textContent = text;
+  return td;
+}
+
+function renderMonitor(monitor){
+  const has = monitor.length > 0;
+  document.getElementById("monitorPanel").hidden = !has;
+  document.getElementById("eventsPanel").hidden = !has;
+  if (!has) { document.getElementById("reasonsPanel").hidden = true; document.getElementById("nearbyPanel").hidden = true; document.getElementById("channelPanel").hidden = true; return; }
+
+  const split = splitIntoSessions(monitor);
+  const { rows, relative, multiSession } = buildDisplayRows(split);
+
+  // Same primary-category sessions buildDisplayRows() grouped rows/sessionIndex
+  // from -- the timeline strip only ever shows the "T+"-vs-absolute scope
+  // already in force for the rest of this panel, never a blend of both.
+  const primaryGroups = relative ? split.relativeSessions : split.timedSessions;
+  document.getElementById("timelineChart").innerHTML = connectionTimelineSVG(computeSessionIntervals(primaryGroups));
+
+  const samples = rows.filter(r => r.event==="SAMPLE" && Number.isFinite(parseFloat(r.rssi_dbm)) && r.rssi_dbm !== "1")
+                       .map(r => ({ x: r.displayX, y: parseFloat(r.rssi_dbm) }));
+  document.getElementById("rssiChart").innerHTML = lineChartSVG(samples, {bands:true});
+
+  // gateway_ping_ms (Build 8a/8b+): only ever a real number on SAMPLE rows
+  // -- every other event logs it as blank -- and "TIMEOUT" rows are
+  // dropped here rather than charted as a false value; pingChartSVG()
+  // draws whatever's left as a plain gap in the line.
+  const pingSamples = rows.filter(r => r.event==="SAMPLE" && Number.isFinite(parseFloat(r.gateway_ping_ms)))
+                           .map(r => ({ x: r.displayX, y: parseFloat(r.gateway_ping_ms) }));
+  document.getElementById("pingChart").innerHTML = pingChartSVG(pingSamples);
+
+  const evRows = rows.filter(r => r.event !== "SAMPLE");
+  const tbody = document.querySelector("#eventsTable tbody");
+  tbody.innerHTML = "";
+  evRows.slice().reverse().forEach(r => {
+    const tr = document.createElement("tr");
+    const pillClass = r.event.includes("CONNECTED") && !r.event.includes("DIS") ? "good"
+                     : r.event === "DISCONNECTED" ? "warn"
+                     : r.event === "CONNECTION_LOST" ? "bad"
+                     : "info";
+    // "device time" -- see parseTime()'s comment: not asserted to be the
+    // viewer's local time or confirmed UTC, just shown as the device logged it.
+    // When relative and more than one boot session is present, each
+    // session's own "T+" clock starts over at zero, so the session index
+    // is appended -- otherwise two unrelated "+10s" rows from different
+    // boots would look identical and directly comparable when they aren't.
+    let timeLabel = relative ? "+" + Math.round(r.t.ms/1000) + "s" : new Date(r.t.ms).toLocaleString();
+    if (relative && multiSession) timeLabel += ` (session ${r.sessionIndex+1})`;
+    tr.appendChild(textCell(timeLabel, "tabular"));
+    const evTd = document.createElement("td");
+    const pill = document.createElement("span");
+    pill.className = "pill " + pillClass;
+    pill.textContent = r.event;   // event is a fixed firmware enum string in practice, but textContent costs nothing extra and needs no trust assumption either way
+    evTd.appendChild(pill);
+    tr.appendChild(evTd);
+    tr.appendChild(textCell(r.recommendation || ""));
+    tbody.appendChild(tr);
+  });
+
+  // disconnect reasons
+  const reasons = new Map();
+  rows.filter(r=>r.event==="DISCONNECTED").forEach(r => {
+    const m = /\(([^)]+)\)/.exec(r.recommendation||"");
+    const key = m ? m[1] : "unknown";
+    reasons.set(key, (reasons.get(key)||0)+1);
+  });
+  const reasonsPanel = document.getElementById("reasonsPanel");
+  reasonsPanel.hidden = reasons.size === 0;
+  if (reasons.size){
+    const sortedReasons = Array.from(reasons.entries()).sort((a,b)=>b[1]-a[1]);
+    document.getElementById("reasonsChart").innerHTML = hBarChartSVG(sortedReasons.map(([k,v])=>({label:k, value:v})));
+    const rb = document.querySelector("#reasonsTable tbody");
+    rb.innerHTML = "";
+    sortedReasons.forEach(([k,v])=>{
+      const tr = document.createElement("tr");
+      tr.appendChild(textCell(k));
+      tr.appendChild(textCell(String(v), "tabular"));
+      rb.appendChild(tr);
+    });
+  }
+
+  // latest nearby-AP snapshot -- computed here, BEFORE the channel survey
+  // below, so its entries can be grouped by channel and drawn as markers
+  // on top of the matching bar there as well as filling this panel's table.
+  const nearbyRows = rows.filter(r=>r.event==="NEARBY_APS");
+  const nearbyPanel = document.getElementById("nearbyPanel");
+  nearbyPanel.hidden = nearbyRows.length === 0;
+  let nearbyEntries = [];
+  if (nearbyRows.length){
+    const latestNearby = nearbyRows[nearbyRows.length-1];
+    let nearbyWhen = relative ? "+"+Math.round(latestNearby.t.ms/1000)+"s" : new Date(latestNearby.t.ms).toLocaleString();
+    if (relative && multiSession) nearbyWhen += ` (session ${latestNearby.sessionIndex+1})`;
+    document.getElementById("nearbyWhen").textContent = nearbyWhen;
+    // KNOWN LIMITATION: this inner format isn't itself CSV-quoted by the
+    // firmware the way the outer CSV fields are -- it's a flat
+    // ";"-separated list of "|"-separated entries. An SSID broadcasting
+    // either character (both are legal in a Wi-Fi SSID) will be split
+    // wrong here, landing in the wrong column or merging two entries.
+    // Not a safety issue -- every value below still goes through
+    // textCell()/textContent, never HTML -- just a data-correctness gap
+    // that belongs in a future firmware format (its own escaping, like
+    // csvEscape() already does for the outer CSV) rather than something
+    // this parser can reliably work around after the fact.
+    nearbyEntries = (latestNearby.recommendation||"").split(";").map(s=>s.trim()).filter(Boolean)
+      .map(e => { const [ssid,bssid,rssi,ch] = e.split("|"); return { ssid, bssid, rssi, ch }; });
+    const nb = document.querySelector("#nearbyTable tbody");
+    nb.innerHTML = "";
+    nearbyEntries.forEach(({ssid,bssid,rssi,ch}) => {
+      const tr = document.createElement("tr");
+      tr.appendChild(textCell(ssid || ""));   // SSID: broadcast by nearby APs, not device-controlled -- see textCell()'s comment
+      tr.appendChild(textCell(bssid || "", "tabular"));
+      tr.appendChild(textCell(rssi || "", "tabular"));
+      tr.appendChild(textCell(ch || "", "tabular"));
+      nb.appendChild(tr);
+    });
+  }
+
+  // latest full channel survey (Build 7.1+ firmware only)
+  const channelRows = rows.filter(r=>r.event==="CHANNEL_SURVEY");
+  const channelPanel = document.getElementById("channelPanel");
+  channelPanel.hidden = channelRows.length === 0;
+  if (channelRows.length){
+    const latest = parseChannelSurvey(channelRows[channelRows.length-1].recommendation || "");
+    const bars = [];
+    for (let ch=1; ch<=13; ch++) bars.push({ ch, value: latest.counts[ch] || 0 });
+    // Group the latest nearby-AP snapshot by channel so it can be drawn as
+    // markers on top of the matching bar -- see the caveat comment in the
+    // channelPanel HTML/paragraph about these two scans not necessarily
+    // being from the same moment.
+    const nearbyByChannel = new Map();
+    nearbyEntries.forEach(({ssid,rssi,ch}) => {
+      const chNum = parseInt(ch,10);
+      if (!Number.isFinite(chNum)) return;
+      if (!nearbyByChannel.has(chNum)) nearbyByChannel.set(chNum, []);
+      nearbyByChannel.get(chNum).push({ ssid, rssi: Number.isFinite(parseFloat(rssi)) ? Math.round(parseFloat(rssi)) : null });
+    });
+    document.getElementById("channelChart").innerHTML = channelCountChartSVG(bars, latest.current, latest.recommended, nearbyByChannel);
+    const rec = document.getElementById("channelRecommend");
+    if (latest.recommended){
+      rec.textContent = latest.recommended === latest.current
+        ? `Already on the lowest overlap-weighted channel seen from here (${latest.current})`
+        : `Channel ${latest.recommended} had a lower overlap-weighted score than channel ${latest.current} from here`;
+      rec.className = "pill " + (latest.recommended === latest.current ? "good" : "warn");
+    } else {
+      rec.textContent = "";
+    }
+  }
+}
+
+function parseChannelSurvey(note){
+  const counts = {};
+  const re = /ch(\d+)=(\d+)/g;
+  let m;
+  while ((m = re.exec(note))) counts[parseInt(m[1],10)] = parseInt(m[2],10);
+  const cur = /current=(\d+)/.exec(note);
+  const rec = /recommended=(\d+)/.exec(note);
+  return { counts, current: cur ? parseInt(cur[1],10) : null, recommended: rec ? parseInt(rec[1],10) : null };
+}
+
+function channelCountChartSVG(bars, current, recommended, nearbyByChannel){
+  const w=900,h=220,pad={l:34,r:14,t:22,b:28};
+  const maxV = Math.max(1, ...bars.map(b=>b.value));
+  const Y = v => pad.t + (1-v/maxV) * (h-pad.t-pad.b);
+  const bw = (w-pad.l-pad.r)/bars.length;
+  const step = Math.max(1, Math.ceil(maxV/4));
+  let grid = "";
+  for (let g=0; g<=maxV; g+=step){
+    grid += `<line class="grid" x1="${pad.l}" x2="${w-pad.r}" y1="${Y(g)}" y2="${Y(g)}"/><text x="2" y="${Y(g)+4}" font-size="11">${g}</text>`;
+  }
+  let bodyS = "";
+  bars.forEach((b,i)=>{
+    const x = pad.l + i*bw + bw*0.15, bwi = bw*0.7, y = Y(b.value);
+    const isCur = b.ch === current, isRec = b.ch === recommended;
+    const fill = isRec ? "var(--good)" : isCur ? "var(--accent)" : "var(--muted)";
+    const op = (isRec || isCur) ? ".9" : ".4";
+    bodyS += `<rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${bwi.toFixed(1)}" height="${(h-pad.b-y).toFixed(1)}" fill="${fill}" opacity="${op}" rx="2"/>`;
+    bodyS += `<text x="${(x+bwi/2).toFixed(1)}" y="${h-pad.b+16}" font-size="10" text-anchor="middle">${b.ch}${isCur?"*":""}${isRec?"★":""}</text>`;
+    // Nearby-AP markers for this channel -- a hollow circle rather than a
+    // new fill color, since this is an annotation on top of the existing
+    // current/recommended/other encoding, not a 4th categorical series.
+    const nearby = (nearbyByChannel && nearbyByChannel.get(b.ch)) || [];
+    nearby.forEach((ap, j) => {
+      const col = j % 6, row = Math.floor(j/6);
+      const mx = x + bwi*0.15 + col*(bwi*0.7/5);
+      const my = Math.max(pad.t+4, y - 8 - row*8);
+      const rssiLabel = ap.rssi!==null ? ap.rssi+" dBm" : "RSSI n/a";
+      bodyS += `<circle cx="${mx.toFixed(1)}" cy="${my.toFixed(1)}" r="3.3" fill="var(--surface)" stroke="var(--fg)" stroke-width="1.2"><title>${escapeHtml(ap.ssid || "(hidden SSID)")} — ${rssiLabel}</title></circle>`;
+    });
+  });
+  return `${grid}<line class="axis" x1="${pad.l}" x2="${w-pad.r}" y1="${h-pad.b}" y2="${h-pad.b}"/>${bodyS}`;
+}
+
+// Horizontal single-hue magnitude chart -- one series (disconnect count per
+// reason), so a single hue with direct value labels is enough; no legend
+// needed, same reasoning as every other single-series chart in this file.
+// Uses var(--warn) to match the existing DISCONNECTED pill color.
+function hBarChartSVG(items){
+  const w=900, h=220, pad={l:170,r:60,t:10,b:10};
+  if (!items.length) return `<text x="20" y="30" font-size="12">No disconnect events recorded.</text>`;
+  const rowH = (h-pad.t-pad.b)/items.length;
+  const maxV = Math.max(1, ...items.map(it=>it.value));
+  const barAreaW = w-pad.l-pad.r;
+  let out = "";
+  items.forEach((it,i)=>{
+    const y = pad.t + i*rowH;
+    const bh = Math.max(6, Math.min(18, rowH-6));
+    const by = y + (rowH-bh)/2;
+    const bw = Math.max(2, it.value/maxV*barAreaW);
+    out += `<text x="${pad.l-8}" y="${(y+rowH/2+4).toFixed(1)}" font-size="11" text-anchor="end" fill="var(--fg)">${escapeHtml(it.label)}</text>`;
+    out += `<rect x="${pad.l}" y="${by.toFixed(1)}" width="${bw.toFixed(1)}" height="${bh.toFixed(1)}" rx="3" fill="var(--warn)" opacity=".85"><title>${escapeHtml(it.label)}: ${it.value} disconnect(s)</title></rect>`;
+    out += `<text x="${(pad.l+bw+6).toFixed(1)}" y="${(y+rowH/2+4).toFixed(1)}" font-size="11" fill="var(--fg)">${it.value}</text>`;
+  });
+  return out;
+}
+
+function barChartSVG(bars){
+  // bars: [{label, value, band}]
+  const w=900,h=220,pad={l:44,r:14,t:14,b:30};
+  if (!bars.length) return `<text x="20" y="40">No zone rows to chart.</text>`;
+  const yMin=-95,yMax=-20;
+  const Y = v => pad.t + (1-(v-yMin)/(yMax-yMin)) * (h-pad.t-pad.b);
+  const bw = (w-pad.l-pad.r)/bars.length;
+  let grid="";
+  for (let g=yMin;g<=yMax;g+=15){
+    grid += `<line class="grid" x1="${pad.l}" x2="${w-pad.r}" y1="${Y(g)}" y2="${Y(g)}"/><text x="4" y="${Y(g)+4}" font-size="11">${g}</text>`;
+  }
+  let bodyS = "";
+  bars.forEach((b,i)=>{
+    const x = pad.l + i*bw + bw*0.15;
+    const bwi = bw*0.7;
+    const y = Y(b.value);
+    bodyS += `<rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${bwi.toFixed(1)}" height="${(h-pad.b-y).toFixed(1)}" fill="${rssiColor(b.value)}" opacity=".85" rx="2"/>`;
+    bodyS += `<text x="${(x+bwi/2).toFixed(1)}" y="${h-pad.b+16}" font-size="11" text-anchor="middle">${escapeHtml(b.label)}</text>`;   // b.label is "Zone "+<CSV zone column> -- externally-influenced free text in principle, escaped before going into this hand-built SVG string
+    bodyS += `<text x="${(x+bwi/2).toFixed(1)}" y="${(y-6).toFixed(1)}" font-size="11" text-anchor="middle" fill="var(--fg)">${Math.round(b.value)}</text>`;
+  });
+  return `${grid}<line class="axis" x1="${pad.l}" x2="${w-pad.r}" y1="${h-pad.b}" y2="${h-pad.b}"/>${bodyS}`;
+}
+
+// Build 9b follow-up: boot_log.csv rows don't carry anything like the
+// firmware's own severity judgment, so this classifies by the same
+// keywords resetReasonLabel() (firmware) uses in its own text -- a
+// genuine fault (PANIC, a watchdog timeout, BROWNOUT, a power glitch, a
+// CPU lock-up, an efuse error) gets flagged; a routine reset (power-on,
+// software reset, deep-sleep wake, USB/external/SDIO/JTAG) doesn't.
+function bootReasonSeverity(label){
+  const l = (label||"").toLowerCase();
+  if (l.includes("panic") || l.includes("watchdog") || l.includes("brownout") || l.includes("lock-up") || l.includes("glitch") || l.includes("efuse")) return "bad";
+  if (l.includes("unknown")) return "warn";
+  return "";
+}
+
+// boot_log.csv (Build 8.1+): one row per power-on, written in setup()
+// before any mode is chosen -- a device-wide history, not a survey
+// session's data, so unlike renderMonitor()/renderWalk() there's no
+// sequence-based session-splitting here (each boot writes exactly once,
+// to SD or to the FFat fallback, never both, so there's no mid-boot
+// storage switch to reconcile the way a monitor/walk session can have).
+// Just a chronological list, with duplicate-upload protection for the
+// case the same file (or an overlapping SD+fallback pair) gets uploaded
+// more than once.
+function renderBoot(boot){
+  const has = boot.length > 0;
+  document.getElementById("bootPanel").hidden = !has;
+  if (!has) return;
+
+  const seen = new Set();
+  const rows = [];
+  boot.forEach(r => {
+    const key = r.timestamp + "|" + r.reset_reason_code + "|" + r.reset_reason_label;
+    if (seen.has(key)) return;
+    seen.add(key);
+    rows.push(r);
+  });
+
+  const timed = rows.map(r => ({ ...r, t: parseTime(r.timestamp) }));
+  // Same precedence as everywhere else in this report: sort by real time
+  // only when there's a shared clock to sort by (parseTime()'s own
+  // comment covers why "T+" rows from different boots can't be compared
+  // this way) -- otherwise this just keeps upload order.
+  const hasAnyAbsolute = timed.some(r => r.t && !r.t.relative);
+  if (hasAnyAbsolute) timed.sort((a,b) => (a.t?a.t.ms:0) - (b.t?b.t.ms:0));
+
+  const tbody = document.querySelector("#bootTable tbody");
+  tbody.innerHTML = "";
+  timed.slice().reverse().forEach(r => {
+    const tr = document.createElement("tr");
+    const timeLabel = r.t ? (r.t.relative ? "+" + Math.round(r.t.ms/1000) + "s" : new Date(r.t.ms).toLocaleString()) : (r.timestamp || "--");
+    tr.appendChild(textCell(timeLabel, "tabular"));
+    const sev = bootReasonSeverity(r.reset_reason_label);
+    const td = document.createElement("td");
+    if (sev){
+      const pill = document.createElement("span");
+      pill.className = "pill " + sev;
+      pill.textContent = r.reset_reason_label || "unknown";   // textContent, not innerHTML -- this is still a firmware-literal string, not attacker-reachable, but no reason to treat it differently from the rest of this table
+      td.appendChild(pill);
+    } else {
+      td.textContent = r.reset_reason_label || "unknown";
+    }
+    tr.appendChild(td);
+    tbody.appendChild(tr);
+  });
+}
+
+function renderWalk(walk){
+  const has = walk.length > 0;
+  document.getElementById("walkPanel").hidden = !has;
+  if (!has) return;
+  const byZone = new Map();
+  walk.forEach(r => {
+    if (r.event !== "SAMPLE") return;
+    const v = parseFloat(r.avg_rssi_dbm ?? r.rssi_dbm);
+    if (!Number.isFinite(v)) return;   // Number.isFinite, not isNaN -- isNaN(Infinity) is false, same reasoning as isValidSurveyPoint()
+    const z = r.zone || "?";
+    if (!byZone.has(z)) byZone.set(z, []);
+    byZone.get(z).push(v);
+  });
+  const bars = Array.from(byZone.entries())
+    .sort((a,b)=> (parseInt(a[0])||0)-(parseInt(b[0])||0))
+    .map(([zone,vals]) => ({ label: "Zone "+zone, value: vals.reduce((s,v)=>s+v,0)/vals.length, count: vals.length }));
+  document.getElementById("zoneChart").innerHTML = barChartSVG(bars);
+  const tb = document.querySelector("#zoneTable tbody");
+  tb.innerHTML = "";
+  bars.forEach(b => {
+    const tr = document.createElement("tr");
+    tr.appendChild(textCell(b.label));
+    tr.appendChild(textCell(Math.round(b.value)+" dBm", "tabular"));
+    tr.appendChild(textCell(String(b.count), "tabular"));
+    tb.appendChild(tr);
+  });
+}
+
+/* ---------- heatmap: inverse-distance-weighted interpolation across a
+   coarse grid, upscaled onto a canvas with smoothing for the soft blend
+   look. All client-side, recomputed on demand -- cheap at this point
+   count (tens of taps), never run on the device. ---------- */
+function idwValue(xPct, yPct, samples, power){
+  let num = 0, den = 0;
+  for (const p of samples){
+    const dx = xPct - p.x, dy = yPct - p.y;
+    const d2 = dx*dx + dy*dy;
+    if (d2 < 0.01) return p.v; // essentially on top of a logged point
+    const w = 1 / Math.pow(d2, power/2);
+    num += w * p.v;
+    den += w;
+  }
+  return den ? num/den : null;
+}
+
+let currentHeatmapRedraw = null;
+window.addEventListener("resize", () => { if (currentHeatmapRedraw) currentHeatmapRedraw(); });
+
+function drawHeatmap(canvas, samples, dispW, dispH){
+  if (!dispW || !dispH || !samples.length) return;
+  const GW = 72, GH = Math.max(1, Math.round(GW * (dispH / dispW)));
+  canvas.width = dispW;
+  canvas.height = dispH;
+
+  const small = document.createElement("canvas");
+  small.width = GW; small.height = GH;
+  const sctx = small.getContext("2d");
+  const data = sctx.createImageData(GW, GH);
+  for (let gy = 0; gy < GH; gy++){
+    for (let gx = 0; gx < GW; gx++){
+      const xPct = (gx + 0.5) / GW * 100, yPct = (gy + 0.5) / GH * 100;
+      const v = idwValue(xPct, yPct, samples, 2);
+      const [r,g,b] = rssiToRGB(v);
+      const idx = (gy*GW + gx) * 4;
+      data.data[idx] = r; data.data[idx+1] = g; data.data[idx+2] = b; data.data[idx+3] = Math.round(0.55*255);
+    }
+  }
+  sctx.putImageData(data, 0, 0);
+
+  const ctx = canvas.getContext("2d");
+  ctx.clearRect(0, 0, dispW, dispH);
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = "high";
+  ctx.drawImage(small, 0, 0, GW, GH, 0, 0, dispW, dispH);
+}
+
+function renderSurvey(survey){
+  const has = survey.length > 0;
+  document.getElementById("surveyPanel").hidden = !has;
+  currentHeatmapRedraw = null;
+  if (!has) return;
+
+  const wrap = document.getElementById("mapWrap");
+  wrap.innerHTML = "";
+  wrap.style.aspectRatio = "";
+  const pts = survey.filter(isValidSurveyPoint);
+  const samples = pts.map(r => ({ x: parseFloat(r.x_percent), y: parseFloat(r.y_percent), v: parseFloat(r.rssi_dbm) }));
+
+  const canShowHeatmap = state.floorplanURL && samples.length >= 4;
+  const mode = state.surveyViewMode === "points" ? "points"
+             : state.surveyViewMode === "heatmap" && canShowHeatmap ? "heatmap"
+             : (state.surveyViewMode === "auto" && canShowHeatmap) ? "heatmap"
+             : "points";
+
+  const heatBtn = document.getElementById("viewHeatmapBtn");
+  const ptsBtn = document.getElementById("viewPointsBtn");
+  heatBtn.classList.toggle("active", mode === "heatmap");
+  ptsBtn.classList.toggle("active", mode === "points");
+  heatBtn.disabled = !canShowHeatmap;
+  heatBtn.title = !state.floorplanURL ? "Add a floor-plan image above first"
+                : samples.length < 4 ? "Need at least 4 tapped points to interpolate a heatmap"
+                : "";
+
+  document.getElementById("heatLegend").hidden = mode !== "heatmap";
+  const note = document.getElementById("heatmapNote");
+  if (mode === "heatmap"){
+    note.hidden = false;
+    note.textContent = "Color between taps is interpolated (inverse-distance weighting) from the logged points, not measured — treat it as an estimate, less reliable far from any tap or with few points logged.";
+  } else {
+    note.hidden = true;
+  }
+
+  let imgEl = null;
+  if (state.floorplanURL){
+    imgEl = document.createElement("img");
+    imgEl.src = state.floorplanURL;
+    wrap.appendChild(imgEl);
+  } else {
+    const box = document.createElement("div");
+    box.className = "mapempty";
+    box.textContent = "Add the matching floor-plan JPEG above to plot points on it — showing raw coordinates for now.";
+    wrap.appendChild(box);
+    wrap.style.aspectRatio = "4/3";
+  }
+
+  if (mode === "heatmap"){
+    const canvas = document.createElement("canvas");
+    canvas.className = "heatCanvas";
+    wrap.appendChild(canvas);
+    const draw = () => requestAnimationFrame(() => drawHeatmap(canvas, samples, wrap.clientWidth, wrap.clientHeight));
+    currentHeatmapRedraw = draw;
+    if (imgEl.complete) draw();
+    else imgEl.addEventListener("load", draw, { once: true });
+
+    // small outlined markers on top so exact tap spots/values stay checkable on hover
+    pts.forEach(r => {
+      const dot = document.createElement("div");
+      dot.className = "mapdot";
+      dot.style.width = "8px"; dot.style.height = "8px";
+      dot.style.left = parseFloat(r.x_percent) + "%";
+      dot.style.top = parseFloat(r.y_percent) + "%";
+      dot.style.background = "rgba(255,255,255,.9)";
+      dot.style.border = "1.5px solid rgba(0,0,0,.5)";
+      dot.title = `${parseFloat(r.rssi_dbm)} dBm @ ${r.timestamp}`;
+      wrap.appendChild(dot);
+    });
+  } else {
+    pts.forEach(r => {
+      const dot = document.createElement("div");
+      dot.className = "mapdot";
+      dot.style.left = parseFloat(r.x_percent) + "%";
+      dot.style.top = parseFloat(r.y_percent) + "%";
+      const rssi = parseFloat(r.rssi_dbm);
+      dot.style.background = rssiColor(rssi);
+      dot.title = `${rssi} dBm @ ${r.timestamp}`;
+      wrap.appendChild(dot);
+    });
+  }
+}
+
+/* ---------- Conclusion: a synthesized, plain-English wrap-up of whatever
+   data is loaded, instead of making the reader cross-reference every
+   panel above themselves. Rebuilt each render() from the same rows the
+   other panels use -- never a separate source of truth. ---------- */
+function renderConclusion(){
+  const panel = document.getElementById("conclusionPanel");
+  const hasAny = state.monitor.length || state.walk.length || state.survey.length;
+  panel.hidden = !hasAny;
+  if (!hasAny) return;
+
+  const bullets = [];
+  const verdicts = [];
+
+  if (state.monitor.length){
+    // Shared session-splitting + uptime logic (same functions renderReadouts/renderMonitor use) --
+    // this used to duplicate its own merge and uptime math, which is exactly the inconsistency
+    // the review flagged. Prefer absolute-time sessions; fall back to relative (no-RTC) sessions
+    // only if there are no timed ones, same precedence as renderMonitor.
+    const split = splitIntoSessions(state.monitor);
+    const sessionRowArrays = split.timedSessions.length ? split.timedSessions : split.relativeSessions;
+    // buildDisplayRows() only globally sorts by timestamp when the
+    // sessions are absolute-time -- for relative ("T+") sessions it
+    // keeps each session's own order and never interleaves one boot's
+    // clock with another's (see its own comment for why that used to be
+    // wrong here and in renderMonitor()).
+    const display = buildDisplayRows(split);
+    const { rows } = display;
+
+    const samples = rows.filter(r => r.event === "SAMPLE" && r.rssi_dbm !== "1" && Number.isFinite(parseFloat(r.rssi_dbm)));
+    const avgRssi = samples.length ? samples.reduce((s,r)=>s+parseFloat(r.rssi_dbm),0)/samples.length : null;
+
+    const uptime = computeUptimeStats(sessionRowArrays);
+    // Same reasoning as renderReadouts(): TIMED session boundaries come
+    // from a timestamp sort that assumes the RTC never goes backward --
+    // if splitIntoSessions() caught a disagreement with sequence order,
+    // this per-session uptime math inherits that uncertainty too.
+    if (sessionRowArrays === split.timedSessions && split.timestampOrderAmbiguous) uptime.isEstimated = true;
+    const durationHrs = uptime.totalMs>0 ? uptime.totalMs/3600000 : null;
+
+    if (avgRssi !== null){
+      const band = rssiBand(avgRssi);
+      verdicts.push(band);
+      bullets.push(`Average signal over ${durationHrs!==null ? durationHrs.toFixed(1)+"h" : "the logged period"} was <strong>${Math.round(avgRssi)} dBm</strong> (${band==="good"?"comfortably strong":band==="warn"?"usable but marginal":"weak"}).`);
+    }
+    if (uptime.uptimePct !== null){
+      const band = uptime.uptimePct>98?"good":uptime.uptimePct>90?"warn":"bad";
+      verdicts.push(band);
+      const estTag = uptime.isEstimated ? "~" : "";
+      const estNote = uptime.isEstimated ? " (estimated -- a connection event appears to be missing from the log, or it begins or ends while already connected, so part of this span is inferred rather than measured)" : "";
+      bullets.push(`Connection stayed up <strong>${estTag}${uptime.uptimePct.toFixed(1)}%</strong> of the time${estNote}, with ${uptime.dropCount} disconnect${uptime.dropCount===1?"":"s"}${uptime.lostCount?` (including ${uptime.lostCount} sustained loss${uptime.lostCount===1?"":"es"})`:""}.`);
+    }
+
+    const reasons = new Map();
+    rows.filter(r=>r.event==="DISCONNECTED").forEach(r => {
+      const m = /\(([^)]+)\)/.exec(r.recommendation||"");
+      const key = m ? m[1] : "unknown";
+      reasons.set(key, (reasons.get(key)||0)+1);
+    });
+    if (reasons.size){
+      const top = Array.from(reasons.entries()).sort((a,b)=>b[1]-a[1])[0];
+      bullets.push(`Most common disconnect cause: <strong>${escapeHtml(top[0])}</strong> (${top[1]} of ${uptime.dropCount}).`);
+    }
+
+    const channelRows = rows.filter(r=>r.event==="CHANNEL_SURVEY");
+    if (channelRows.length){
+      const latest = parseChannelSurvey(channelRows[channelRows.length-1].recommendation || "");
+      if (latest.current && latest.recommended){
+        if (latest.recommended === latest.current){
+          bullets.push(`Channel survey saw channel ${latest.current} with the lowest overlap-weighted AP count from this device's position — consistent with the current channel.`);
+        } else {
+          bullets.push(`Channel survey saw channel <strong>${latest.recommended}</strong> with a lower overlap-weighted AP count than the current channel ${latest.current} from this device's position at scan time. A lower score isn't a direct measurement of interference or performance, and if the AP is on Auto/ACS channel selection, its own controller has visibility (traffic load, sometimes non-Wi-Fi interference) this reading doesn't, so treat this as a local observation rather than a recommendation to override it.`);
+        }
+      }
+    }
+
+    const lowHeapRows = rows.filter(r=>r.event==="LOW_HEAP");
+    if (lowHeapRows.length){
+      verdicts.push("warn");
+      bullets.push(`Free-heap warnings were logged ${lowHeapRows.length} time${lowHeapRows.length===1?"":"s"} — worth watching if this becomes frequent.`);
+    }
+
+    // Build 9b follow-up: TIME_SYNC and MISSED_EVENTS used to only show up
+    // as rows in the events table below, with no readout anywhere that
+    // actually summarized them -- same gap LOW_HEAP had before it got its
+    // own bullet above. Neither is itself a problem (TIME_SYNC is routine
+    // clock upkeep), but MISSED_EVENTS means the uptime/drop figures above
+    // may be missing transitions from that gap, so it's called out.
+    const timeSyncRows = rows.filter(r=>r.event==="TIME_SYNC");
+    if (timeSyncRows.length){
+      bullets.push(`The clock was corrected from NTP ${timeSyncRows.length} time${timeSyncRows.length===1?"":"s"} during this log — routine upkeep, not a fault.`);
+    }
+    const missedEventsRows = rows.filter(r=>r.event==="MISSED_EVENTS");
+    if (missedEventsRows.length){
+      verdicts.push("warn");
+      bullets.push(`${missedEventsRows.length} MISSED_EVENTS row${missedEventsRows.length===1?"":"s"} ${missedEventsRows.length===1?"was":"were"} logged — the device's internal event queue filled up at least once, so the uptime and disconnect figures above may be missing some transitions from that gap.`);
+    }
+
+    if (!bullets.length){
+      bullets.push("Monitor log loaded, but didn't contain enough timestamped rows to summarize.");
+    }
+
+    // Everything above (uptime, drops, disconnect causes, channel/heap
+    // readings) comes ONLY from the primary timestamp category -- if the
+    // OTHER category also has rows, whatever they contain (including any
+    // disconnects) is NOT reflected in this assessment at all, not just
+    // absent from the chart. Said plainly here rather than leaving it to
+    // the readouts panel's banner, since this conclusion reads as a
+    // complete wrap-up on its own.
+    if (display.otherRowCount > 0){
+      bullets.push(`This connection assessment covers only the ${display.relative ? "relative (\"T+\")" : "absolute-time"} rows in this log — <strong>${display.otherRowCount} row(s)</strong> across ${display.otherSessionCount} session(s) use ${display.otherCategory} timestamps (not the same clock, so not merged in here) and are excluded from everything above, including any disconnects or other events they may contain. See the readouts panel above for a separate uptime figure covering those rows.`);
+    }
+  }
+
+  if (state.walk.length){
+    const byZone = new Map();
+    state.walk.forEach(r => {
+      if (r.event !== "SAMPLE") return;
+      const v = parseFloat(r.avg_rssi_dbm ?? r.rssi_dbm);
+      if (!Number.isFinite(v)) return;   // Number.isFinite, not isNaN -- see renderWalk()'s identical fix
+      const z = r.zone || "?";
+      if (!byZone.has(z)) byZone.set(z, []);
+      byZone.get(z).push(v);
+    });
+    if (byZone.size){
+      const zoneAvgs = Array.from(byZone.entries()).map(([z,vals])=>({zone:z, avg: vals.reduce((s,v)=>s+v,0)/vals.length}));
+      zoneAvgs.sort((a,b)=>a.avg-b.avg);
+      const worst = zoneAvgs[0], best = zoneAvgs[zoneAvgs.length-1];
+      verdicts.push(rssiBand(worst.avg));
+      if (zoneAvgs.length > 1){
+        bullets.push(`Walk survey's weakest zone was <strong>Zone ${escapeHtml(worst.zone)}</strong> (${Math.round(worst.avg)} dBm); strongest was Zone ${escapeHtml(best.zone)} (${Math.round(best.avg)} dBm).`);
+      } else {
+        bullets.push(`Walk survey covered one zone, averaging <strong>${Math.round(worst.avg)} dBm</strong>.`);
+      }
+    } else {
+      bullets.push("Walk survey log loaded, but didn't contain enough valid zone samples to summarize.");
+    }
+  }
+
+  if (state.survey.length){
+    const pts = state.survey.filter(isValidSurveyPoint);
+    if (pts.length){
+      const sorted = pts.slice().sort((a,b)=>parseFloat(a.rssi_dbm)-parseFloat(b.rssi_dbm));
+      const weakest = sorted[0];
+      const avg = pts.reduce((s,r)=>s+parseFloat(r.rssi_dbm),0)/pts.length;
+      verdicts.push(rssiBand(parseFloat(weakest.rssi_dbm)));
+      bullets.push(`Floor-plan survey averaged <strong>${Math.round(avg)} dBm</strong> across ${pts.length} tap${pts.length===1?"":"s"}; the weakest was <strong>${Math.round(parseFloat(weakest.rssi_dbm))} dBm</strong> at (${parseFloat(weakest.x_percent).toFixed(0)}%, ${parseFloat(weakest.y_percent).toFixed(0)}%) on the plan.`);
+    } else {
+      bullets.push("Floor-plan survey log loaded, but didn't contain enough valid tapped points to summarize.");
+    }
+  }
+
+  // verdicts.length === 0 means every loaded log failed to produce a real
+  // assessment (no usable samples/points in any of them) -- defaulting
+  // "good" in that case would print "Looking solid" on data that was
+  // never actually evaluated, which is the opposite of the caution this
+  // page otherwise takes. A neutral verdict instead of a potentially
+  // false reassurance.
+  let overall;
+  if (verdicts.length === 0) overall = "unknown";
+  else if (verdicts.includes("bad")) overall = "bad";
+  else if (verdicts.includes("warn")) overall = "warn";
+  else overall = "good";
+  const verdictLabel = overall === "unknown" ? "Insufficient data"
+                      : overall === "good" ? "Looking solid"
+                      : overall === "warn" ? "Mostly fine, worth a look"
+                      : "Needs attention";
+  const vEl = document.getElementById("conclusionVerdict");
+  vEl.textContent = verdictLabel;
+  vEl.className = "pill " + (overall === "unknown" ? "muted" : overall);
+
+  const body = document.getElementById("conclusionBody");
+  body.innerHTML = `<ul style="margin:0;padding-left:18px;line-height:1.7">${bullets.map(b=>`<li>${b}</li>`).join("")}</ul>`;
+}
+
+/* ---------- file handling ---------- */
+function updateFileStatus(){
+  const n = state.monitor.length + state.walk.length + state.survey.length;
+  const el = document.getElementById("fileStatus");
+  let html;
+  if (!n){
+    html = "No files loaded yet — drop in monitor_log, walk_survey, survey or boot_log CSVs, any combination, SD and FFat copies included.";
+  } else {
+    const parts = [];
+    if (state.monitor.length) parts.push(`<strong>${state.monitor.length}</strong> monitor rows`);
+    if (state.walk.length) parts.push(`<strong>${state.walk.length}</strong> walk rows`);
+    if (state.survey.length) parts.push(`<strong>${state.survey.length}</strong> survey rows`);
+    html = parts.join(" &middot; ");
+  }
+  if (state.unrecognizedFiles.length){
+    html += (n ? " &middot; " : "") + `<span style="color:var(--bad)">couldn't read: ${state.unrecognizedFiles.map(n=>escapeHtml(n)).join(", ")} (not a monitor/walk/survey log this tool recognizes)</span>`;
+  }
+  if (state.unreadableFiles.length){
+    html += " &middot; " + `<span style="color:var(--bad)">failed to load: ${state.unreadableFiles.map(n=>escapeHtml(n)).join(", ")} (file couldn't be read -- try re-selecting it)</span>`;
+  }
+  if (state.malformedFiles.length){
+    html += " &middot; " + `<span style="color:var(--warn)">${state.malformedFiles.map(m=>escapeHtml(m)).join("; ")}</span>`;
+  }
+  el.innerHTML = html;
+}
+
+document.getElementById("csvInput").addEventListener("change", (e) => {
+  const files = Array.from(e.target.files || []);
+  if (!files.length) return;
+  state.usingExample = false;
+  state.monitor = []; state.walk = []; state.survey = []; state.boot = []; state.unrecognizedFiles = []; state.unreadableFiles = []; state.malformedFiles = [];
+  let remaining = files.length;
+  const settle = () => { remaining--; if (remaining === 0){ updateFileStatus(); render(); } };
+  files.forEach(f => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const parsed = parseCSV(reader.result);
+      let matched = false;
+      if (parsed){
+        const type = detectType(parsed.header);
+        const objs = rowsToObjects(parsed.header, parsed.rows);
+        if (type === "monitor") { state.monitor = state.monitor.concat(objs); matched = true; }
+        else if (type === "walk") { state.walk = state.walk.concat(objs); matched = true; }
+        else if (type === "survey") { state.survey = state.survey.concat(objs); matched = true; }
+        else if (type === "boot") { state.boot = state.boot.concat(objs); matched = true; }
+        // Surface parse problems even on an otherwise-matched file -- a
+        // malformed row or an unterminated quote means some of what got
+        // loaded may not be what the firmware actually wrote.
+        if (matched && parsed.unterminatedQuote){
+          state.malformedFiles.push(`${f.name}: ends with an unterminated quoted field -- the tail of the file may have been parsed incorrectly`);
+        }
+        if (matched && parsed.malformedRowCount > 0){
+          state.malformedFiles.push(`${f.name}: ${parsed.malformedRowCount} row(s) had a different number of fields than the header and may be misaligned`);
+        }
+        // Reported separately from the field-count mismatch above: a
+        // row's quoting can be invalid (a stray quote mid-field, or
+        // trailing characters right after a closing quote) independent
+        // of whether that row happens to land on the right field count.
+        if (matched && parsed.malformedQuoteRowCount > 0){
+          state.malformedFiles.push(`${f.name}: ${parsed.malformedQuoteRowCount} row(s) had invalid quoting (a quote outside a field's opening position, or stray characters after a closing quote) and may have been misread`);
+        }
+      }
+      if (!matched) state.unrecognizedFiles.push(f.name);
+      settle();
+    };
+    reader.onerror = () => {
+      state.unreadableFiles.push(f.name);
+      settle();
+    };
+    reader.onabort = () => {
+      state.unreadableFiles.push(f.name);
+      settle();
+    };
+    reader.readAsText(f);
+  });
+});
+
+document.getElementById("imgInput").addEventListener("change", (e) => {
+  const f = e.target.files && e.target.files[0];
+  if (!f) return;
+  if (state.floorplanURL) URL.revokeObjectURL(state.floorplanURL);   // each selection used to leak the previous one
+  state.floorplanURL = URL.createObjectURL(f);
+  render();
+});
+
+document.getElementById("dismissExample").addEventListener("click", () => {
+  document.getElementById("exampleBanner").hidden = true;
+});
+
+document.getElementById("viewHeatmapBtn").addEventListener("click", () => {
+  state.surveyViewMode = "heatmap";
+  render();
+});
+document.getElementById("viewPointsBtn").addEventListener("click", () => {
+  state.surveyViewMode = "points";
+  render();
+});
+
+/* ---------- example data, clearly marked, shown until real files land ---------- */
+function loadExample(){
+  const monitorCSV = `sequence,storage,timestamp,event,rssi_dbm,recommendation,gateway_ping_ms
+1,SD,2026-10-05 09:00:00,CONNECTED,-52,SSID=HomeNet BSSID=AA:BB:CC:00:11:22,
+2,SD,2026-10-05 09:05:00,SAMPLE,-53,Signal good,22
+3,SD,2026-10-05 09:10:00,SAMPLE,-55,Signal good,24
+4,SD,2026-10-05 09:15:00,SAMPLE,-58,Signal good,27
+5,SD,2026-10-05 09:20:00,NEARBY_APS,1,NeighbourA|11:22:33:44:55:66|-70|6; NeighbourB|22:33:44:55:66:77|-82|6,
+6,SD,2026-10-05 09:20:00,CHANNEL_SURVEY,1,"ch1=4 ch2=0 ch3=0 ch4=0 ch5=0 ch6=5 ch7=0 ch8=0 ch9=0 ch10=0 ch11=1 ch12=0 ch13=0 current=1 recommended=11 -- visible-AP counts only (>-80dBm), 2.4GHz only, not traffic volume or non-WiFi interference",
+7,SD,2026-10-05 09:25:00,SAMPLE,-62,Signal fair,31
+8,SD,2026-10-05 09:30:00,DISCONNECTED,1,"reason=200 (beacon timeout) Disconnect occurred despite strong signal and low detected Wi-Fi congestion. Possible causes include router-side issues, client/AP compatibility, or non-Wi-Fi interference.",
+9,SD,2026-10-05 09:30:18,RECONNECTED,-54,SSID=HomeNet BSSID=AA:BB:CC:00:11:22,
+10,SD,2026-10-05 09:32:00,TIME_SYNC,1,RTC corrected from NTP: 2026-10-05 09:32:00 -> 2026-10-05 09:32:01,
+11,SD,2026-10-05 09:35:00,SAMPLE,-56,Signal good,21
+12,SD,2026-10-05 09:40:00,SAMPLE,-74,Signal fair,TIMEOUT
+13,SD,2026-10-05 09:42:00,MISSED_EVENTS,1,1 connection event(s) were dropped because the internal event queue filled up -- this boot's drop count/uptime bookkeeping may be missing some transitions from this gap.,
+14,SD,2026-10-05 09:45:00,SAMPLE,-59,Signal good,19
+`;
+  const walkCSV = `sequence,storage,event,zone,timestamp,rssi_dbm,avg_rssi_dbm,recommendation
+1,SD,SAMPLE,1,2026-10-05 10:00:00,-50,-51,Good
+2,SD,SAMPLE,1,2026-10-05 10:00:05,-52,-51,Good
+3,SD,ZONE_CHANGE,2,2026-10-05 10:02:00,-50,-51,Zone 2 started here
+4,SD,SAMPLE,2,2026-10-05 10:02:05,-68,-66,Fair
+5,SD,SAMPLE,2,2026-10-05 10:02:10,-64,-66,Fair
+6,SD,ZONE_CHANGE,3,2026-10-05 10:04:00,-64,-66,Zone 3 started here
+7,SD,SAMPLE,3,2026-10-05 10:04:05,-80,-79,Poor
+8,SD,SAMPLE,3,2026-10-05 10:04:10,-78,-79,Poor
+`;
+  const surveyCSV = `sequence,storage,floorplan,x_percent,y_percent,img_x,img_y,timestamp,rssi_dbm
+1,SD,plan1.jpg,20.0,30.0,64,72,2026-10-05 11:00:00,-50
+2,SD,plan1.jpg,45.0,35.0,144,84,2026-10-05 11:01:00,-58
+3,SD,plan1.jpg,60.0,55.0,192,132,2026-10-05 11:02:00,-72
+4,SD,plan1.jpg,78.0,70.0,250,168,2026-10-05 11:03:00,-83
+`;
+  const bootCSV = `sequence,storage,timestamp,reset_reason_code,reset_reason_label
+1,SD,2026-10-04 22:10:00,0,power-on (fresh power-up)
+1,SD,2026-10-05 08:59:50,12,task watchdog timeout -- a task hung without yielding
+`;
+  const m = parseCSV(monitorCSV), w = parseCSV(walkCSV), s = parseCSV(surveyCSV), b = parseCSV(bootCSV);
+  state.monitor = rowsToObjects(m.header, m.rows);
+  state.walk = rowsToObjects(w.header, w.rows);
+  state.survey = rowsToObjects(s.header, s.rows);
+  state.boot = rowsToObjects(b.header, b.rows);
+  state.usingExample = true;
+  // The bundled example is supposed to be clean, valid CSV -- if a future
+  // edit to the strings above reintroduces an unquoted comma or an
+  // unterminated quote, parseCSV() will already catch it via
+  // malformedRowCount/unterminatedQuote. Surface that here too rather
+  // than letting the built-in example quietly demo broken parsing.
+  [["monitor_log example", m], ["walk_survey example", w], ["survey example", s], ["boot_log example", b]].forEach(([name, parsed]) => {
+    if (parsed.malformedRowCount > 0) console.warn(`Wi-FEye Report: ${name} has ${parsed.malformedRowCount} malformed row(s) -- the bundled example data needs fixing.`);
+    if (parsed.malformedQuoteRowCount > 0) console.warn(`Wi-FEye Report: ${name} has ${parsed.malformedQuoteRowCount} row(s) with invalid quoting -- the bundled example data needs fixing.`);
+    if (parsed.unterminatedQuote) console.warn(`Wi-FEye Report: ${name} ends with an unterminated quote -- the bundled example data needs fixing.`);
+  });
+  updateFileStatus();
+  render();
+}
+/* ---------- export: only meaningful when this page is running on its
+   own top-level tab/window (saved locally and opened directly) rather
+   than inside the hosted viewer's sandboxed frame, where both printing
+   and a script-triggered download are blocked outright. Detecting that
+   and simply not showing the buttons there is simpler and more honest
+   than showing a button that silently does nothing. ---------- */
+const isStandalone = (() => { try { return window.self === window.top; } catch (e) { return false; } })();
+if (isStandalone) document.getElementById("exportBar").hidden = false;
+
+document.getElementById("printBtn").addEventListener("click", () => window.print());
+
+document.getElementById("downloadBtn").addEventListener("click", () => {
+  const lines = [];
+  lines.push("Wi-FEye Report -- exported " + new Date().toLocaleString());
+  lines.push("=".repeat(50));
+  document.querySelectorAll("#readouts .readout").forEach(r => {
+    const label = r.querySelector(".label")?.textContent || "";
+    const value = r.querySelector(".value")?.textContent || "";
+    lines.push(label + ": " + value);
+  });
+  document.querySelectorAll(".panel:not([hidden])").forEach(panel => {
+    const heading = panel.querySelector("h2")?.textContent;
+    if (!heading) return;
+    lines.push("", "-- " + heading + " --");
+    const trs = panel.querySelectorAll("table tbody tr");
+    if (trs.length){
+      trs.forEach(tr => {
+        const cells = Array.from(tr.querySelectorAll("td")).map(td => td.textContent.trim());
+        if (cells.length) lines.push(cells.join("  |  "));
+      });
+    } else {
+      panel.querySelectorAll("li").forEach(li => lines.push("- " + li.textContent.trim()));
+    }
+  });
+  const blob = new Blob([lines.join("\n")], { type: "text/plain" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = "wifeye-report-" + new Date().toISOString().slice(0,10) + ".txt";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  // Deferred rather than revoked right after click() -- the browser's
+  // download handling isn't guaranteed to have finished reading the
+  // blob by the time click() returns synchronously, so revoking
+  // immediately risks the download seeing an already-dead URL in some
+  // browsers. A short delay lets that happen first.
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+});
+
+loadExample();
+</script>
+
+</body></html>
