@@ -283,7 +283,7 @@ footer{margin-top:28px; color:var(--muted); font-size:12px; text-align:center}
   </div>
   <div class="mapwrap" id="mapWrap"><div class="mapempty">Add the matching floor-plan JPEG above to plot points on it — showing raw coordinates for now.</div></div>
   <div class="heatLegend" id="heatLegend" hidden>
-    <span>-90 dBm</span><div class="bar"></div><span>-40 dBm</span>
+    <span id="heatLegendLo">-90 dBm</span><div class="bar"></div><span id="heatLegendHi">-40 dBm</span>
   </div>
   <p id="heatmapNote" style="font-size:12px;color:var(--muted);margin:8px 0 0" hidden></p>
 </div>
@@ -557,24 +557,40 @@ function isValidSurveyPoint(r){
    same three status hues already used everywhere else in this report
    (good/warn/bad), just blended smoothly between them instead of banded,
    so the heatmap sits visually consistent with the rest of the page
-   rather than introducing a separate sequential ramp. ---------- */
+   rather than introducing a separate sequential ramp.
+
+   Stops are fractional positions (0..1) along THIS SURVEY's own
+   weakest-to-strongest reading, not fixed absolute dBm values -- a
+   fixed -95..-55 scale meant a survey whose real spread was narrow
+   (e.g. a 12dB range on one small floor) only ever painted a narrow
+   slice of the ramp, looking washed-out regardless of interpolation
+   tuning, even though the weakest point on THAT survey really is its
+   weak spot. Rescaling per-survey makes every survey use the full
+   red-to-green ramp between its own min and max, at the cost of "red"
+   meaning a different absolute dBm in different surveys -- the legend
+   is filled in with the actual dBm bounds each time specifically so
+   that's never hidden. See rssiToRGB()'s lo/hi params and the legend
+   update in renderSurvey(). ---------- */
 const HEAT_STOPS = [
-  [-95, [217, 54, 54]],   // --bad
-  [-85, [214, 94, 29]],   // bad -> warn
-  [-75, [185, 121, 10]],  // --warn
-  [-65, [120, 140, 26]],  // warn -> good
-  [-55, [31, 157, 85]],   // --good
+  [0.00, [217, 54, 54]],   // --bad   (this survey's weakest reading)
+  [0.25, [214, 94, 29]],
+  [0.50, [185, 121, 10]],  // --warn
+  [0.75, [120, 140, 26]],
+  [1.00, [31, 157, 85]],   // --good  (this survey's strongest reading)
 ];
-function rssiToRGB(rssi){
-  const v = Math.max(HEAT_STOPS[0][0], Math.min(HEAT_STOPS[HEAT_STOPS.length-1][0], rssi));
+function rssiToRGB(rssi, lo, hi){
+  // Degenerate case: every sample read the same, or lo/hi weren't
+  // passed -- nothing to scale against, so just render the top of the
+  // ramp rather than dividing by zero.
+  const t = hi > lo ? Math.max(0, Math.min(1, (rssi - lo) / (hi - lo))) : 1;
   for (let i = 0; i < HEAT_STOPS.length - 1; i++){
     const [a, ca] = HEAT_STOPS[i], [b, cb] = HEAT_STOPS[i+1];
-    if (v >= a && v <= b){
-      const t = (v - a) / (b - a);
+    if (t >= a && t <= b){
+      const tt = (t - a) / (b - a);
       return [
-        Math.round(ca[0] + (cb[0]-ca[0])*t),
-        Math.round(ca[1] + (cb[1]-ca[1])*t),
-        Math.round(ca[2] + (cb[2]-ca[2])*t),
+        Math.round(ca[0] + (cb[0]-ca[0])*tt),
+        Math.round(ca[1] + (cb[1]-ca[1])*tt),
+        Math.round(ca[2] + (cb[2]-ca[2])*tt),
       ];
     }
   }
@@ -1536,7 +1552,7 @@ function idwValue(xPct, yPct, samples, power){
 let currentHeatmapRedraw = null;
 window.addEventListener("resize", () => { if (currentHeatmapRedraw) currentHeatmapRedraw(); });
 
-function drawHeatmap(canvas, samples, dispW, dispH){
+function drawHeatmap(canvas, samples, dispW, dispH, lo, hi){
   if (!dispW || !dispH || !samples.length) return;
   const GW = 72, GH = Math.max(1, Math.round(GW * (dispH / dispW)));
   canvas.width = dispW;
@@ -1550,7 +1566,7 @@ function drawHeatmap(canvas, samples, dispW, dispH){
     for (let gx = 0; gx < GW; gx++){
       const xPct = (gx + 0.5) / GW * 100, yPct = (gy + 0.5) / GH * 100;
       const v = idwValue(xPct, yPct, samples, 4);
-      const [r,g,b] = rssiToRGB(v);
+      const [r,g,b] = rssiToRGB(v, lo, hi);
       const idx = (gy*GW + gx) * 4;
       data.data[idx] = r; data.data[idx+1] = g; data.data[idx+2] = b; data.data[idx+3] = Math.round(0.72*255);
     }
@@ -1593,9 +1609,20 @@ function renderSurvey(survey){
 
   document.getElementById("heatLegend").hidden = mode !== "heatmap";
   const note = document.getElementById("heatmapNote");
+  // Color is scaled to THIS survey's own weakest-to-strongest reading
+  // (see the comment above HEAT_STOPS) -- computed here, once, and
+  // reused for both the legend labels and the actual pixels drawn
+  // below, so the legend never shows a different range than what was
+  // actually rendered.
+  let heatLo = 0, heatHi = 0;
   if (mode === "heatmap"){
+    const vals = samples.map(s => s.v);
+    heatLo = Math.min(...vals);
+    heatHi = Math.max(...vals);
+    document.getElementById("heatLegendLo").textContent = `${Math.round(heatLo)} dBm`;
+    document.getElementById("heatLegendHi").textContent = `${Math.round(heatHi)} dBm`;
     note.hidden = false;
-    note.textContent = "Color between taps is interpolated (inverse-distance weighting) from the logged points, not measured — treat it as an estimate, less reliable far from any tap or with few points logged.";
+    note.textContent = `Color is scaled to this survey's own readings (${Math.round(heatLo)} to ${Math.round(heatHi)} dBm here) rather than a fixed scale, so it isn't directly comparable to a heatmap from a different survey. Interpolated between taps (inverse-distance weighting), not measured — treat it as an estimate, less reliable far from any tap or with few points logged.`;
   } else {
     note.hidden = true;
   }
@@ -1617,7 +1644,7 @@ function renderSurvey(survey){
     const canvas = document.createElement("canvas");
     canvas.className = "heatCanvas";
     wrap.appendChild(canvas);
-    const draw = () => requestAnimationFrame(() => drawHeatmap(canvas, samples, wrap.clientWidth, wrap.clientHeight));
+    const draw = () => requestAnimationFrame(() => drawHeatmap(canvas, samples, wrap.clientWidth, wrap.clientHeight, heatLo, heatHi));
     currentHeatmapRedraw = draw;
     if (imgEl.complete) draw();
     else imgEl.addEventListener("load", draw, { once: true });
