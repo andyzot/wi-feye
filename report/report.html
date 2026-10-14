@@ -488,6 +488,44 @@ function rssiToRGB(rssi, lo, hi){
   return HEAT_SPECTRUM[HEAT_SPECTRUM.length-1][1];
 }
 
+// Contour-style banding: rather than a smooth per-pixel gradient (which
+// reads as each tap radiating its own colour outward, like a transmitter),
+// the estimated value is bucketed into a small number of discrete bands
+// and every pixel in a band gets that band's flat colour -- the same way
+// a contour map fills space between survey pegs with one solid colour per
+// elevation band, joining up all the ground that falls in the same band
+// regardless of how many readings happen to sit inside it.
+const HEAT_BANDS = 6;
+function bandColor(v, lo, hi){
+  const frac = Math.max(0, Math.min(1, (v - lo) / (hi - lo)));
+  const bandIdx = Math.min(HEAT_BANDS - 1, Math.floor(frac * HEAT_BANDS));
+  const bandMidFrac = (bandIdx + 0.5) / HEAT_BANDS;
+  return rssiToRGB(lo + bandMidFrac * (hi - lo), lo, hi);
+}
+
+// The confidence radius/fade (used below in drawHeatmap) needs to scale to
+// how densely this particular survey was actually tapped -- a fixed
+// percentage either leaves gaps between a normally-spaced row of taps, or
+// over-extrapolates for a sparse one. The median distance from each point
+// to its nearest neighbour is a reasonable stand-in for "how far apart did
+// this person usually tap," and the radius/fade are sized off that.
+function medianNearestNeighborPct(samples){
+  if (samples.length < 2) return 15; // no neighbour to measure -- a sane default
+  const dists = samples.map(p => {
+    let best = Infinity;
+    for (const q of samples){
+      if (q === p) continue;
+      const dx = p.x - q.x, dy = p.y - q.y;
+      const d2 = dx*dx + dy*dy;
+      if (d2 < best) best = d2;
+    }
+    return Math.sqrt(best);
+  });
+  dists.sort((a,b) => a - b);
+  const mid = Math.floor(dists.length / 2);
+  return dists.length % 2 ? dists[mid] : (dists[mid-1] + dists[mid]) / 2;
+}
+
 /* State */
 let state = {
   monitor: [], walk: [], survey: [], boot: [],
@@ -1154,9 +1192,20 @@ function drawHeatmap(canvas, samples, dispW, dispH){
   // in unsurveyed territory still fades out exactly as before, so this
   // doesn't bring back the earlier "confident colour across unmeasured
   // floor" problem.
+  //
+  // The radius/fade scale to this survey's own typical tap spacing (see
+  // medianNearestNeighborPct) rather than a fixed percentage of the image --
+  // a fixed number either left gaps between a normally-spaced row of taps,
+  // or would over-extrapolate for a sparsely-tapped one. And the fill
+  // colour itself is now banded (bandColor) rather than a smooth gradient,
+  // so a cluster of nearby taps reading the same band merges into one
+  // solid contour-style region instead of each tap keeping its own
+  // separately-shaded halo.
   const BASE_ALPHA = 0.38;
-  const CONFIDENCE_RADIUS_PCT = 10;
-  const FADE_SPAN_PCT = 22;
+  const spacingPct = medianNearestNeighborPct(samples);
+  const clampPct = (v, mn, mx) => Math.max(mn, Math.min(mx, v));
+  const CONFIDENCE_RADIUS_PCT = clampPct(spacingPct * 0.55, 4, 25);
+  const FADE_SPAN_PCT = clampPct(spacingPct * 0.9, 6, 30);
 
   const small = document.createElement("canvas");
   small.width = GW; small.height = GH;
@@ -1166,7 +1215,7 @@ function drawHeatmap(canvas, samples, dispW, dispH){
     for (let gx = 0; gx < GW; gx++){
       const xPct = (gx + 0.5) / GW * 100, yPct = (gy + 0.5) / GH * 100;
       const v = idwValue(xPct, yPct, samples, 2);
-      const [r,g,b] = rssiToRGB(v, lo, hi);
+      const [r,g,b] = bandColor(v, lo, hi);
 
       let unconf = 1; // running product of (1 - pointConf) across all points
       for (const p of samples){
@@ -1190,7 +1239,7 @@ function drawHeatmap(canvas, samples, dispW, dispH){
   ctx.clearRect(0, 0, dispW, dispH);
   ctx.imageSmoothingEnabled = true;
   ctx.imageSmoothingQuality = "high";
-  ctx.filter = "blur(3px)"; // soft, broad regions rather than tight point-level detail
+  ctx.filter = "blur(2px)"; // just enough to soften the low-res grid's jagged band edges, without smearing the band boundaries back into a gradient
   ctx.drawImage(small, 0, 0, GW, GH, 0, 0, dispW, dispH);
   ctx.filter = "none";
 
