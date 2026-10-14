@@ -1140,6 +1140,20 @@ function drawHeatmap(canvas, samples, dispW, dispH){
   // radius, opacity ramps down to fully transparent (not a dim tint) over
   // FADE_SPAN_PCT more, so unsurveyed ground shows the bare floor plan
   // rather than an extrapolated guess.
+  //
+  // Confidence is pooled across every point, not just the single nearest
+  // one. Each point contributes its own radius/fade falloff (pointConf,
+  // below); these are combined as 1 - product(1 - pointConf) -- the usual
+  // way to combine several independent "how sure am I" estimates. A lone
+  // point far from any other falls back to its own falloff unchanged (the
+  // product has only one non-trivial term), but several points near each
+  // other reinforce one another, so the confident area between a cluster
+  // of nearby taps fills in solidly instead of dipping back toward
+  // transparent between each one's individual halo -- nearby corroborating
+  // readings really do support the ground between them; a lone point out
+  // in unsurveyed territory still fades out exactly as before, so this
+  // doesn't bring back the earlier "confident colour across unmeasured
+  // floor" problem.
   const BASE_ALPHA = 0.38;
   const CONFIDENCE_RADIUS_PCT = 10;
   const FADE_SPAN_PCT = 22;
@@ -1154,16 +1168,16 @@ function drawHeatmap(canvas, samples, dispW, dispH){
       const v = idwValue(xPct, yPct, samples, 2);
       const [r,g,b] = rssiToRGB(v, lo, hi);
 
-      let nearest2 = Infinity;
+      let unconf = 1; // running product of (1 - pointConf) across all points
       for (const p of samples){
         const dx = xPct - p.x, dy = yPct - p.y;
-        const d2 = dx*dx + dy*dy;
-        if (d2 < nearest2) nearest2 = d2;
+        const dist = Math.sqrt(dx*dx + dy*dy);
+        const pointConf = dist <= CONFIDENCE_RADIUS_PCT
+          ? 1.0
+          : Math.max(0, 1.0 - (dist - CONFIDENCE_RADIUS_PCT) / FADE_SPAN_PCT);
+        unconf *= (1 - pointConf);
       }
-      const dist = Math.sqrt(nearest2);
-      const conf = dist <= CONFIDENCE_RADIUS_PCT
-        ? 1.0
-        : Math.max(0, 1.0 - (dist - CONFIDENCE_RADIUS_PCT) / FADE_SPAN_PCT);
+      const conf = 1 - unconf;
 
       const idx = (gy*GW + gx) * 4;
       data.data[idx] = r; data.data[idx+1] = g; data.data[idx+2] = b;
