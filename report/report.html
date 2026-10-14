@@ -1166,6 +1166,47 @@ function idwValue(xPct, yPct, samples, power){
 let currentHeatmapRedraw = null;
 window.addEventListener("resize", () => { if (currentHeatmapRedraw) currentHeatmapRedraw(); });
 
+// With only a few dozen taps, power=2 IDW on its own produces a "lumpy"
+// field -- lots of small local bumps right around individual points,
+// because each point's influence falls off sharply and nearby points with
+// slightly different readings pull the estimate around in a small
+// neighbourhood. Once that gets bucketed into bands (bandColor), those
+// bumps show up as a scatter of small, separate islands rather than the
+// large, smooth, continuous regions a real RF field actually has. This
+// smooths the underlying value grid itself (not just the final picture)
+// before banding, which is what a real contour map does too -- the
+// surface is smoothed before contour lines are drawn across it, rather
+// than drawing contours straight off noisy point data. Two box-blur
+// passes approximate a Gaussian cheaply at this grid size.
+function boxBlurGrid(src, w, h, radius){
+  const tmp = new Float32Array(w * h);
+  const out = new Float32Array(w * h);
+  for (let y = 0; y < h; y++){
+    for (let x = 0; x < w; x++){
+      let sum = 0, cnt = 0;
+      for (let dx = -radius; dx <= radius; dx++){
+        const xx = Math.min(w - 1, Math.max(0, x + dx));
+        sum += src[y*w + xx]; cnt++;
+      }
+      tmp[y*w + x] = sum / cnt;
+    }
+  }
+  for (let x = 0; x < w; x++){
+    for (let y = 0; y < h; y++){
+      let sum = 0, cnt = 0;
+      for (let dy = -radius; dy <= radius; dy++){
+        const yy = Math.min(h - 1, Math.max(0, y + dy));
+        sum += tmp[yy*w + x]; cnt++;
+      }
+      out[y*w + x] = sum / cnt;
+    }
+  }
+  return out;
+}
+function smoothValueGrid(grid, w, h){
+  return boxBlurGrid(boxBlurGrid(grid, w, h, 2), w, h, 2);
+}
+
 function drawHeatmap(canvas, samples, dispW, dispH){
   if (!dispW || !dispH || !samples.length) return;
   const GW = 96, GH = Math.max(1, Math.round(GW * (dispH / dispW)));
@@ -1207,15 +1248,14 @@ function drawHeatmap(canvas, samples, dispW, dispH){
   const CONFIDENCE_RADIUS_PCT = clampPct(spacingPct * 0.55, 4, 25);
   const FADE_SPAN_PCT = clampPct(spacingPct * 0.9, 6, 30);
 
-  const small = document.createElement("canvas");
-  small.width = GW; small.height = GH;
-  const sctx = small.getContext("2d");
-  const data = sctx.createImageData(GW, GH);
+  // Pass 1: raw IDW value and pooled confidence per grid cell.
+  const vGrid = new Float32Array(GW * GH);
+  const confGrid = new Float32Array(GW * GH);
   for (let gy = 0; gy < GH; gy++){
     for (let gx = 0; gx < GW; gx++){
       const xPct = (gx + 0.5) / GW * 100, yPct = (gy + 0.5) / GH * 100;
-      const v = idwValue(xPct, yPct, samples, 2);
-      const [r,g,b] = bandColor(v, lo, hi);
+      const cellIdx = gy*GW + gx;
+      vGrid[cellIdx] = idwValue(xPct, yPct, samples, 2);
 
       let unconf = 1; // running product of (1 - pointConf) across all points
       for (const p of samples){
@@ -1226,11 +1266,29 @@ function drawHeatmap(canvas, samples, dispW, dispH){
           : Math.max(0, 1.0 - (dist - CONFIDENCE_RADIUS_PCT) / FADE_SPAN_PCT);
         unconf *= (1 - pointConf);
       }
-      const conf = 1 - unconf;
+      confGrid[cellIdx] = 1 - unconf;
+    }
+  }
 
-      const idx = (gy*GW + gx) * 4;
+  // Pass 2: smooth the value surface itself (see smoothValueGrid) before
+  // banding it into colour -- this is what turns a scatter of small, noisy
+  // islands into the large, smooth, continuous regions a real RF field
+  // actually has. Confidence is left as computed above: it marks where
+  // real data does or doesn't support the picture, which shouldn't be
+  // blurred away.
+  const vSmooth = smoothValueGrid(vGrid, GW, GH);
+
+  const small = document.createElement("canvas");
+  small.width = GW; small.height = GH;
+  const sctx = small.getContext("2d");
+  const data = sctx.createImageData(GW, GH);
+  for (let gy = 0; gy < GH; gy++){
+    for (let gx = 0; gx < GW; gx++){
+      const cellIdx = gy*GW + gx;
+      const [r,g,b] = bandColor(vSmooth[cellIdx], lo, hi);
+      const idx = cellIdx * 4;
       data.data[idx] = r; data.data[idx+1] = g; data.data[idx+2] = b;
-      data.data[idx+3] = Math.round(BASE_ALPHA * conf * 255);
+      data.data[idx+3] = Math.round(BASE_ALPHA * confGrid[cellIdx] * 255);
     }
   }
   sctx.putImageData(data, 0, 0);
