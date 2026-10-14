@@ -1253,8 +1253,11 @@ function drawHeatmap(canvas, samples, dispW, dispH){
   // existed to stop unsurveyed ground from looking as confidently covered
   // as a real reading; a low, uniform floor tint doesn't claim that kind of
   // confidence, it just avoids a stark blank patch next to a coloured one.
+  // (0.22 still looked like bare white on a sparsely-tapped site -- at
+  // BASE_ALPHA 0.8 that's under 20% opacity, barely visible. 0.5 reads as
+  // a clear, visible wash/blend of the surrounding colour instead.)
   const BASE_ALPHA = 0.8;
-  const CONFIDENCE_FLOOR = 0.22;
+  const CONFIDENCE_FLOOR = 0.5;
   const spacingPct = medianNearestNeighborPct(samples);
   const clampPct = (v, mn, mx) => Math.max(mn, Math.min(mx, v));
   const CONFIDENCE_RADIUS_PCT = clampPct(spacingPct * 0.55, 4, 25);
