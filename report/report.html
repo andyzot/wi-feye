@@ -495,7 +495,7 @@ function rssiToRGB(rssi, lo, hi){
 // a contour map fills space between survey pegs with one solid colour per
 // elevation band, joining up all the ground that falls in the same band
 // regardless of how many readings happen to sit inside it.
-const HEAT_BANDS = 6;
+const HEAT_BANDS = 10;
 function bandColor(v, lo, hi){
   const frac = Math.max(0, Math.min(1, (v - lo) / (hi - lo)));
   const bandIdx = Math.min(HEAT_BANDS - 1, Math.floor(frac * HEAT_BANDS));
@@ -1242,7 +1242,19 @@ function drawHeatmap(canvas, samples, dispW, dispH){
   // so a cluster of nearby taps reading the same band merges into one
   // solid contour-style region instead of each tap keeping its own
   // separately-shaded halo.
-  const BASE_ALPHA = 0.38;
+  // BASE_ALPHA is the opacity in fully-confident territory -- raised from
+  // the original 0.38 (which, blended over the pale floor-plan background,
+  // read as washed-out/pastel) to render the bands as bright, clear colour.
+  // CONFIDENCE_FLOOR stops that opacity from ever reaching zero: an area
+  // with no nearby taps still shows a diluted tint of whatever the IDW
+  // field estimates there (which is itself pulled toward the nearest real
+  // readings), rather than vanishing to bare floor plan. This intentionally
+  // relaxes the earlier "fade fully to transparent" rule -- that rule
+  // existed to stop unsurveyed ground from looking as confidently covered
+  // as a real reading; a low, uniform floor tint doesn't claim that kind of
+  // confidence, it just avoids a stark blank patch next to a coloured one.
+  const BASE_ALPHA = 0.8;
+  const CONFIDENCE_FLOOR = 0.22;
   const spacingPct = medianNearestNeighborPct(samples);
   const clampPct = (v, mn, mx) => Math.max(mn, Math.min(mx, v));
   const CONFIDENCE_RADIUS_PCT = clampPct(spacingPct * 0.55, 4, 25);
@@ -1288,7 +1300,8 @@ function drawHeatmap(canvas, samples, dispW, dispH){
       const [r,g,b] = bandColor(vSmooth[cellIdx], lo, hi);
       const idx = cellIdx * 4;
       data.data[idx] = r; data.data[idx+1] = g; data.data[idx+2] = b;
-      data.data[idx+3] = Math.round(BASE_ALPHA * confGrid[cellIdx] * 255);
+      const dilutedConf = CONFIDENCE_FLOOR + (1 - CONFIDENCE_FLOOR) * confGrid[cellIdx];
+      data.data[idx+3] = Math.round(BASE_ALPHA * dilutedConf * 255);
     }
   }
   sctx.putImageData(data, 0, 0);
@@ -1297,7 +1310,7 @@ function drawHeatmap(canvas, samples, dispW, dispH){
   ctx.clearRect(0, 0, dispW, dispH);
   ctx.imageSmoothingEnabled = true;
   ctx.imageSmoothingQuality = "high";
-  ctx.filter = "blur(2px)"; // just enough to soften the low-res grid's jagged band edges, without smearing the band boundaries back into a gradient
+  ctx.filter = "blur(4px)"; // feathers the boundary between adjacent bands so they spread into each other rather than meeting at a hard edge
   ctx.drawImage(small, 0, 0, GW, GH, 0, 0, dispW, dispH);
   ctx.filter = "none";
 
