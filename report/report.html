@@ -448,21 +448,24 @@ function isNotFoundSurveyPoint(r){
    the nearest 5 dBm -- so a survey's real spread always uses the colour
    range fully, instead of bunching into a narrow slice of a scale sized for
    a much wider spread. This means colours are NOT comparable between two
-   different surveys (see the on-screen caption) -- only within one. Control
-   points sampled from a turbo-style spectrum: strong=red/orange, moderate=
-   yellow/green, weak=blue/purple. ---------- */
+   different surveys (see the on-screen caption) -- only within one.
+   Control points sampled directly from a reference site-survey tool's
+   legend: the weak end of the range renders in greyscale (present but not
+   worth much), with a hard jump into a vivid orange -> yellow -> green
+   ramp for everything above that -- rather than a smooth hue sweep across
+   the whole range, so "weak" and "good" read as qualitatively different
+   at a glance, not just different shades of one rainbow. ---------- */
 const HEAT_SPECTRUM = [
-  [0.0, [ 53,  30,  88]],
-  [0.1, [ 70, 100, 218]],
-  [0.2, [ 58, 163, 252]],
-  [0.3, [ 24, 217, 200]],
-  [0.4, [ 74, 248, 128]],
-  [0.5, [161, 253,  61]],
-  [0.6, [223, 223,  55]],
-  [0.7, [254, 169,  51]],
-  [0.8, [243,  99,  21]],
-  [0.9, [204,  43,   4]],
-  [1.0, [139,   9,   2]],
+  [0.00, [151, 151, 151]],
+  [0.30, [124, 124, 124]],
+  [0.32, [124, 124, 124]],
+  [0.33, [255, 219,  76]],
+  [0.45, [255, 240,  76]],
+  [0.55, [220, 255,  76]],
+  [0.65, [181, 255,  76]],
+  [0.75, [150, 255,  76]],
+  [0.85, [100, 255,  76]],
+  [1.00, [ 76, 255,  76]],
 ];
 function heatRangeFor(samples){
   if (!samples.length) return { lo: -90, hi: -60 };
