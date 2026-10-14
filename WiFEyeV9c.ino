@@ -1208,7 +1208,8 @@ unsigned long blueHoldStartMs = 0;   // 0 = not currently holding Blue
 // mode instead: kicked off in logSurveyPoint(), then polled from loop()
 // via checkPendingScan() so the rest of the sketch (pan, zoom, buttons)
 // keeps responding while it runs in the background. (Now app.scanPending.)
-int pendingPointIdx = -1;
+int pendingPointIdx = -1;        // ring-buffer slot (points[] array index) the pending scan will write its result into
+long pendingLogicalIndex = -1;   // Build 9c: the *logical* tap number (pointCount at tap time, never wraps) the pending scan belongs to -- undoLastPoint() compares against this, not the wrapped slot, so undo still identifies the right tap once logging has gone past MAX_POINTS and slots are being reused
 float pendingXPercent = 0, pendingYPercent = 0;
 float pendingImgX = 0, pendingImgY = 0;   // Build 7: full-resolution pixel coords, carried through to the CSV's img_x/img_y columns alongside the existing percentages
 unsigned long scanStartMs = 0;
@@ -1227,14 +1228,23 @@ bool touchOnUI = false;   // true if the current touch started on a zoom icon
 int16_t lastTouchScreenX = 0, lastTouchScreenY = 0;
 
 // --- Survey points (kept in RAM for on-screen dots; CSV is the durable copy) ---
+// Build 9c: logging to the CSV is unlimited (bounded only by SD card
+// space) -- only the on-screen dot display is capped, as a ring buffer of
+// the most recent MAX_POINTS taps. pointCount counts every tap ever logged
+// this floor-plan session (it does not wrap or reset at MAX_POINTS); the
+// array slot a given tap's dot lives in is pointCount % MAX_POINTS. Once
+// more than MAX_POINTS taps have been placed, older dots are silently
+// overwritten on screen by newer ones -- the CSV itself is never affected,
+// it's the one place that was ever meant to be the durable copy. 300 taps
+// at ~16 bytes each is under 5KB, trivial for this board's RAM.
 struct SurveyPoint {
   float imgX, imgY;   // full-resolution image pixel coordinates
   int rssi;
   uint16_t color;
 };
-#define MAX_POINTS 50
+#define MAX_POINTS 300
 SurveyPoint points[MAX_POINTS];
-int pointCount = 0;
+int pointCount = 0;   // total taps logged this floor-plan session -- unbounded, see note above
 
 // TJpg_Decoder callback used only for the boot logo: pushes decoded blocks
 // straight to the TFT (no PSRAM buffering — unlike the floor-plan decoder
@@ -1540,9 +1550,13 @@ void appendCsvLine(float xPercent, float yPercent, int rssi, float imgX, float i
   Serial.println(CSV_FILE);
 }
 
-// Removes the last data line from CSV_FILE (keeps the header). The file is
-// small (at most MAX_POINTS short lines), so it's simplest to read it whole
-// into RAM, drop everything after the last remaining newline, and rewrite.
+// Removes the last data line from CSV_FILE (keeps the header). Build 9c:
+// logging is now unlimited, so this can no longer assume "the file is
+// small" the way the old comment here did -- reading the whole thing into
+// one RAM String (the old approach) risked heap exhaustion/fragmentation
+// on a long session's CSV. Instead this streams the file line by line into
+// a temp file, holding only the current and previous line in RAM at once
+// (never the whole file), and writes every line except the very last one.
 void removeLastCsvLine() {
   File src = SD.open(CSV_FILE, FILE_READ);
   if (!src) {
@@ -1551,30 +1565,45 @@ void removeLastCsvLine() {
     return;
   }
 
-  String content = "";
+  const char* tmpPath = "/undo_tmp.csv";
+  SD.remove(tmpPath);   // in case a previous undo was interrupted mid-way
+  File dst = SD.open(tmpPath, FILE_WRITE);
+  if (!dst) {
+    Serial.println("Could not create temp file for undo");
+    src.close();
+    return;
+  }
+
+  String prevLine;
+  bool havePrev = false, wroteAny = false;
   while (src.available()) {
-    content += (char)src.read();
+    String line = src.readStringUntil('\n');
+    if (havePrev) {
+      dst.print(prevLine);
+      dst.print('\n');
+      wroteAny = true;
+    }
+    prevLine = line;
+    havePrev = true;
   }
   src.close();
+  dst.close();
 
-  content.trim();   // drop trailing newline so lastIndexOf finds the right one
-  int lastNewline = content.lastIndexOf('\n');
-  if (lastNewline < 0) {
+  if (!wroteAny) {
+    // Zero or one line total (an empty file, or just the header) -- there's
+    // no data line that can be safely dropped without also losing the
+    // header, so bail out rather than guess.
+    SD.remove(tmpPath);
     Serial.println("CSV has no data line to remove");
     return;
   }
-  content = content.substring(0, lastNewline + 1);   // keep everything up to (and including) that newline
 
-  SD.remove(CSV_FILE);   // FILE_WRITE would append, not overwrite, so remove first
-  File dst = SD.open(CSV_FILE, FILE_WRITE);
-  if (!dst) {
-    Serial.print("Could not recreate CSV after undo: ");
-    Serial.println(CSV_FILE);
+  SD.remove(CSV_FILE);
+  if (!SD.rename(tmpPath, CSV_FILE)) {
+    Serial.print("Warning: could not move undo result into place -- corrected data is at ");
+    Serial.println(tmpPath);
     return;
   }
-  dst.print(content);
-  dst.close();
-
   Serial.println("Removed last line from CSV");
 }
 
@@ -1589,16 +1618,21 @@ void undoLastPoint() {
   // If the last point's scan hasn't finished yet, no CSV line was written
   // for it at all — just cancel the pending scan and drop the point,
   // rather than removing the *previous* point's CSV row by mistake.
-  bool wasPending = (app.scanPending && pendingPointIdx == pointCount - 1);
+  // Build 9c: compared against pendingLogicalIndex (the unwrapped tap
+  // number), not pendingPointIdx (the wrapped array slot) -- the slot
+  // alone is ambiguous once logging has gone past MAX_POINTS and slots
+  // are being reused by later taps.
+  bool wasPending = (app.scanPending && pendingLogicalIndex == pointCount - 1);
 
   pointCount--;
   Serial.print("Undid last point — ");
   Serial.print(pointCount);
-  Serial.println(" point(s) remaining on screen");
+  Serial.println(" tap(s) logged so far this session");
 
   if (wasPending) {
     app.scanPending = false;
     pendingPointIdx = -1;
+    pendingLogicalIndex = -1;
     Serial.println("(cancelled its in-progress scan; no CSV line was written for it)");
   } else {
     removeLastCsvLine();
@@ -1688,7 +1722,11 @@ void drawSurveyPoints() {
   float srcX0, srcY0;
   computeViewOrigin(srcX0, srcY0);
 
-  for (int i = 0; i < pointCount; i++) {
+  // Build 9c: pointCount can exceed MAX_POINTS now (logging is unlimited);
+  // the ring buffer only ever has at most MAX_POINTS live slots, so that's
+  // the real loop bound once it's filled, not pointCount itself.
+  int shown = (pointCount < MAX_POINTS) ? pointCount : MAX_POINTS;
+  for (int i = 0; i < shown; i++) {
     float sx = (points[i].imgX - srcX0) * app.zoom;
     float sy = (points[i].imgY - srcY0) * app.zoom;
     if (sx < -6 || sx > SCREEN_W + 6 || sy < -6 || sy > SCREEN_H + 6) continue;
@@ -1826,20 +1864,20 @@ void checkPendingScan() {
   }
   Serial.print("Point ");
   Serial.print(pointCount);
-  Serial.print("/");
-  Serial.println(MAX_POINTS);
+  Serial.println(" logged to CSV (unlimited -- only the most recent "
+                  "MAX_POINTS taps keep a dot on screen)");
 
   appendCsvLine(pendingXPercent, pendingYPercent, rssi, pendingImgX, pendingImgY);
 
   app.scanPending = false;
   pendingPointIdx = -1;
+  pendingLogicalIndex = -1;
 }
 
 void logSurveyPoint(int16_t screenX, int16_t screenY) {
-  if (pointCount >= MAX_POINTS) {
-    Serial.println("Survey point storage full, ignoring tap");
-    return;
-  }
+  // Build 9c: no storage-full check here any more -- logging itself is
+  // unlimited (see the note above points[]/MAX_POINTS). The only limit
+  // left is the in-progress-scan guard just below.
 
   // A scan from an earlier tap is still running — starting another one
   // now would restart WiFi.scanNetworks() on top of it, silently
@@ -1879,8 +1917,14 @@ void logSurveyPoint(int16_t screenX, int16_t screenY) {
 
   // Show a pending dot immediately, before the (slow) scan runs, so the
   // tap feels instant. This point gets updated in place once we know
-  // the real RSSI, a few lines down.
-  int idx = pointCount;
+  // the real RSSI, a few lines down. idx wraps via MAX_POINTS (ring
+  // buffer, Build 9c) -- pointCount itself keeps counting every tap ever
+  // made this session, unbounded. thisTapIndex is captured *before* the
+  // increment below, since that's the logical tap number this specific
+  // tap is -- pointCount itself has moved on by the time undoLastPoint()
+  // might compare against it.
+  int thisTapIndex = pointCount;
+  int idx = thisTapIndex % MAX_POINTS;
   points[idx].imgX = imgX;
   points[idx].imgY = imgY;
   points[idx].rssi = RSSI_PENDING;
@@ -1897,6 +1941,7 @@ void logSurveyPoint(int16_t screenX, int16_t screenY) {
   WiFi.scanNetworks(true);   // true = async
   app.scanPending = true;
   pendingPointIdx = idx;
+  pendingLogicalIndex = thisTapIndex;   // Build 9c: the unwrapped tap number, for undoLastPoint()
   pendingXPercent = xPercent;
   pendingYPercent = yPercent;
   pendingImgX = imgX;
@@ -2132,6 +2177,7 @@ ModeEntryResult pickAndLoadFloorPlan() {
   if (app.scanPending) {
     app.scanPending = false;
     pendingPointIdx = -1;
+    pendingLogicalIndex = -1;
     WiFi.scanDelete();
   }
 
