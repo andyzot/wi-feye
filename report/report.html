@@ -179,6 +179,8 @@ footer{margin-top:28px; color:var(--muted); font-size:12px; text-align:center}
   <div class="row">
     <label>CSV logs</label>
     <input type="file" id="csvInput" accept=".csv,text/csv" multiple>
+    <button type="button" id="addMoreCsvBtn" class="ghost" title="Add more CSV files to what's already loaded, instead of replacing it -- use this to combine several separate survey sessions (e.g. a Mode 1 scan that got split across more than one file) into a single report.">+ Add more files</button>
+    <input type="file" id="csvAddInput" accept=".csv,text/csv" multiple hidden>
   </div>
   <div class="row">
     <label>Floor plan (optional)</label>
@@ -1609,7 +1611,7 @@ function updateFileStatus(){
     if (state.monitor.length) parts.push(`<strong>${state.monitor.length}</strong> monitor rows`);
     if (state.walk.length) parts.push(`<strong>${state.walk.length}</strong> walk rows`);
     if (state.survey.length) parts.push(`<strong>${state.survey.length}</strong> survey rows`);
-    html = parts.join(" &middot; ");
+    html = parts.join(" &middot; ") + ' &middot; got another session to fold in? use "+ Add more files" above instead of re-picking everything.';
   }
   if (state.unrecognizedFiles.length){
     html += (n ? " &middot; " : "") + `<span style="color:var(--bad)">couldn't read: ${state.unrecognizedFiles.map(n=>escapeHtml(n)).join(", ")} (not a log this tool recognizes)</span>`;
@@ -1623,11 +1625,18 @@ function updateFileStatus(){
   el.innerHTML = html;
 }
 
-document.getElementById("csvInput").addEventListener("change", (e) => {
-  const files = Array.from(e.target.files || []);
+// Shared by both CSV inputs below. append=false (the main picker) replaces
+// whatever's currently loaded, like before. append=true (the "+ Add more
+// files" button) keeps what's already loaded and merges the new files into
+// it -- this is how you combine separate survey sessions (e.g. a Mode 1
+// floor-plan scan that had to be split across more than one file) into one
+// report, without needing to re-select every file together in one go.
+function loadCsvFiles(files, append){
   if (!files.length) return;
   state.usingExample = false;
-  state.monitor = []; state.walk = []; state.survey = []; state.boot = []; state.unrecognizedFiles = []; state.unreadableFiles = []; state.malformedFiles = [];
+  if (!append){
+    state.monitor = []; state.walk = []; state.survey = []; state.boot = []; state.unrecognizedFiles = []; state.unreadableFiles = []; state.malformedFiles = [];
+  }
   let remaining = files.length;
   const settle = () => { remaining--; if (remaining === 0){ updateFileStatus(); render(); } };
   files.forEach(f => {
@@ -1659,6 +1668,19 @@ document.getElementById("csvInput").addEventListener("change", (e) => {
     reader.onabort = () => { state.unreadableFiles.push(f.name); settle(); };
     reader.readAsText(f);
   });
+}
+
+document.getElementById("csvInput").addEventListener("change", (e) => {
+  loadCsvFiles(Array.from(e.target.files || []), false);
+});
+
+document.getElementById("addMoreCsvBtn").addEventListener("click", () => {
+  document.getElementById("csvAddInput").click();
+});
+
+document.getElementById("csvAddInput").addEventListener("change", (e) => {
+  loadCsvFiles(Array.from(e.target.files || []), true);
+  e.target.value = "";   // so picking the same file again later still fires a change event
 });
 
 document.getElementById("imgInput").addEventListener("change", (e) => {
