@@ -574,6 +574,7 @@
 #include <Adafruit_ILI9341.h>
 #include <XPT2046_Touchscreen.h>
 #include <TJpg_Decoder.h>
+#include <Preferences.h>  // Build 9c: persists a redone touch calibration across power cycles -- part of the ESP32 core, no extra library needed
 #include "wifeye_logo_data.h"   // Wi-FEye boot logo, baked into flash (see showBootScreen)
 // Build 8.2: secrets.h/TARGET_SSID removed -- Mode 3 never used it (SoftAP
 // Prov instead), and Build 8's on-screen network picker means Modes 1/2
@@ -683,6 +684,7 @@ void waitForRelease(uint8_t pin) {
 
 Adafruit_ILI9341 tft = Adafruit_ILI9341(TFT_CS, TFT_DC, TFT_RST);
 XPT2046_Touchscreen touch(T_CS, T_IRQ);
+Preferences touchPrefs;   // Build 9c: holds a redone touch calibration across reboots -- see loadTouchCalibration()/saveTouchCalibration()
 
 // RTC (Build 2) -- authoritative wall-clock time, kept accurate across power
 // cycles (and even with no internet at all) by its own coin-cell backup.
@@ -800,11 +802,19 @@ void writeCsvField(File &f, const char *field, bool last) {
   writeCsvField(f, String(field), last);   // rare path -- a copy here is fine
 }
 
-// Confirmed touch calibration
-const int X_raw_min = 842;
-const int X_raw_max = 3300;
-const int Y_raw_min = 760;
-const int Y_raw_max = 3249;
+// Build 9c: these used to be a hardcoded "confirmed touch calibration" --
+// fine for the specific physical panel they were measured on, but with no
+// way to redo it without editing this source and reflashing. Now they're
+// plain variables, seeded with those same original values as a sane
+// default, and overwritten at boot by loadTouchCalibration() if a
+// recalibration has been saved (see runTouchCalibration(), reached from the
+// More menu's "Touch Calibration" option). mapTouch() below is completely
+// unchanged -- whichever four values are in here is what it uses, so every
+// screen in the sketch benefits from a recalibration automatically.
+int X_raw_min = 842;
+int X_raw_max = 3300;
+int Y_raw_min = 760;
+int Y_raw_max = 3249;
 
 const int SCREEN_W = 320;
 const int SCREEN_H = 240;
@@ -2491,6 +2501,7 @@ void setup() {
 
   touch.begin();
   touch.setRotation(1);
+  loadTouchCalibration();   // Build 9c: overwrites the compiled-in default above if a recalibration was saved
 
   tft.begin();
   tft.setRotation(3);
@@ -3158,16 +3169,201 @@ void showFileBrowserScreen() {
   Serial.println("File Browser: disconnected, returning to menu");
 }
 
+// ===========================================================================
+// Touch calibration (Build 9c) -- reached from the More menu. Redoes the
+// panel's raw-touch-to-screen mapping on the actual device in front of you,
+// instead of the single value baked in at X_raw_min/max, Y_raw_min/max
+// above (see that comment). mapTouch() itself never changes -- this only
+// ever updates the four numbers it already reads, so a recalibration here
+// benefits every screen in the sketch immediately, with no other code
+// changes needed anywhere else.
+// ===========================================================================
+
+// How far the two crosshair targets sit in from the true screen corners.
+// Taps right at the physical edge are the least reliable part of the panel
+// (see mapTouch()'s TOUCH_MARGIN comment) -- this keeps both targets
+// comfortably inside that unreliable fringe while still being close enough
+// to the corners that the two points span nearly the full panel.
+const int CAL_MARGIN = 28;
+const int MIN_CAL_RAW_SEPARATION = 300;   // the full panel spans ~2000-2500 raw units; much less than this and the two taps probably landed in the same spot
+
+// Loads a previously-saved calibration over the compiled-in default above,
+// if one exists. Safe to call unconditionally at boot -- Preferences just
+// creates the "touchcal" namespace on first-ever use, and a missing/absent
+// "valid" key leaves X_raw_min etc. untouched at their defaults.
+void loadTouchCalibration() {
+  touchPrefs.begin("touchcal", true);   // true = read-only
+  if (touchPrefs.getBool("valid", false)) {
+    X_raw_min = touchPrefs.getInt("xmin", X_raw_min);
+    X_raw_max = touchPrefs.getInt("xmax", X_raw_max);
+    Y_raw_min = touchPrefs.getInt("ymin", Y_raw_min);
+    Y_raw_max = touchPrefs.getInt("ymax", Y_raw_max);
+    Serial.println("Touch calibration: loaded a saved one from flash");
+  } else {
+    Serial.println("Touch calibration: none saved -- using the compiled-in default");
+  }
+  touchPrefs.end();
+}
+
+void saveTouchCalibration(int xmin, int xmax, int ymin, int ymax) {
+  touchPrefs.begin("touchcal", false);   // false = read-write
+  touchPrefs.putBool("valid", true);
+  touchPrefs.putInt("xmin", xmin);
+  touchPrefs.putInt("xmax", xmax);
+  touchPrefs.putInt("ymin", ymin);
+  touchPrefs.putInt("ymax", ymax);
+  touchPrefs.end();
+  Serial.println("Touch calibration: saved");
+}
+
+// Draws one crosshair target with an instruction line beneath it.
+void drawCalibrationTarget(int x, int y, const char* label) {
+  tft.fillScreen(ILI9341_BLACK);
+  tft.drawFastHLine(x - 16, y, 33, ILI9341_YELLOW);
+  tft.drawFastVLine(x, y - 16, 33, ILI9341_YELLOW);
+  tft.drawCircle(x, y, 6, ILI9341_YELLOW);
+  tft.setTextColor(ILI9341_WHITE);
+  tft.setTextSize(1);
+  tft.setCursor(10, SCREEN_H - 20);
+  tft.print(label);
+}
+
+// Waits for a touch, then averages a handful of samples taken a few ms
+// apart -- the very first raw reading right as a finger/stylus lands is
+// often noisier than the ones that follow once contact has settled, so
+// this steadies the result a bit rather than trusting a single sample.
+// Waits for release before returning, so the caller never sees this same
+// contact again.
+TS_Point readStableTouchPoint() {
+  while (!touch.touched()) delay(10);
+  long sumX = 0, sumY = 0;
+  int n = 0;
+  for (int i = 0; i < 6; i++) {
+    if (touch.touched()) {
+      TS_Point p = touch.getPoint();
+      if (!isInvalidTouch(p)) { sumX += p.x; sumY += p.y; n++; }
+    }
+    delay(15);
+  }
+  TS_Point avg;
+  if (n > 0) {
+    avg.x = sumX / n;
+    avg.y = sumY / n;
+  } else {
+    avg = touch.getPoint();   // fallback -- shouldn't normally happen given the while() above
+  }
+  while (touch.touched()) delay(10);   // wait for release before the caller moves on
+  return avg;
+}
+
+// Two crosshair targets, inset from opposite corners, each tapped once.
+// The two (raw touch, known screen position) pairs are solved directly
+// against mapTouch()'s existing linear map() formula to produce new
+// X_raw_min/max, Y_raw_min/max -- the same four numbers the compiled-in
+// default sets, just freshly measured on this panel. Nothing is written to
+// flash until you confirm it on a live test screen first, so a mistaken tap
+// here can be discarded without disturbing whatever calibration was
+// already working.
+void runTouchCalibration() {
+  waitForRelease(BTN_GREEN);   // the press that opened this screen may still be held
+
+  const int ax = CAL_MARGIN, ay = CAL_MARGIN;
+  const int bx = SCREEN_W - 1 - CAL_MARGIN, by = SCREEN_H - 1 - CAL_MARGIN;
+
+  drawCalibrationTarget(ax, ay, "Tap the crosshair (1 of 2)");
+  TS_Point pA = readStableTouchPoint();
+
+  drawCalibrationTarget(bx, by, "Tap the crosshair (2 of 2)");
+  TS_Point pB = readStableTouchPoint();
+
+  int dxRaw = (int)pB.x - (int)pA.x;
+  int dyRaw = (int)pB.y - (int)pA.y;
+  if (abs(dxRaw) < MIN_CAL_RAW_SEPARATION || abs(dyRaw) < MIN_CAL_RAW_SEPARATION) {
+    tft.fillScreen(ILI9341_BLACK);
+    tft.setTextColor(ILI9341_RED);
+    tft.setCursor(10, 10);
+    tft.println("Those two taps read too close");
+    tft.setCursor(10, 25);
+    tft.println("together -- not saved.");
+    tft.setTextColor(ILI9341_WHITE);
+    tft.setCursor(10, 45);
+    tft.println("Try again from the More menu.");
+    delay(3000);
+    return;
+  }
+
+  // Fit screenX = mx*rawX + cx through the two (rawX, screenX) points, and
+  // likewise screenY = my*rawY + cy -- then back out the X_raw_min/max,
+  // Y_raw_min/max that make mapTouch()'s own map() call reproduce that same
+  // line (see the comment above X_raw_min for the formula this inverts).
+  float mx = (float)(bx - ax) / (float)dxRaw;
+  float my = (float)(by - ay) / (float)dyRaw;
+  float cx = ax - mx * pA.x;
+  float cy = ay - my * pA.y;
+
+  int newXmin = (int)lround(-(cx + TOUCH_MARGIN) / mx);
+  int newXmax = (int)lround(newXmin + (SCREEN_W - 1 + 2 * TOUCH_MARGIN) / mx);
+  int newYmin = (int)lround(-(cy + TOUCH_MARGIN) / my);
+  int newYmax = (int)lround(newYmin + (SCREEN_H - 1 + 2 * TOUCH_MARGIN) / my);
+
+  // Remember what was active before, in case the live test below isn't
+  // liked and Green discards this attempt.
+  int oldXmin = X_raw_min, oldXmax = X_raw_max, oldYmin = Y_raw_min, oldYmax = Y_raw_max;
+  X_raw_min = newXmin; X_raw_max = newXmax; Y_raw_min = newYmin; Y_raw_max = newYmax;
+
+  // Live test: mapTouch() reads the globals just updated above, so taps
+  // from here on already use the NEW calibration -- drawing a dot under
+  // each one lets you check it actually tracks a finger/stylus before
+  // either committing it to flash or throwing it away.
+  tft.fillScreen(ILI9341_BLACK);
+  tft.setTextColor(ILI9341_WHITE);
+  tft.setTextSize(1);
+  tft.setCursor(10, 5);
+  tft.println("Tap anywhere to test the new calibration.");
+  tft.setCursor(10, 18);
+  tft.println("Yellow = save it   Green = discard, keep old");
+
+  while (true) {
+    if (digitalRead(BTN_YELLOW) == LOW) {
+      waitForRelease(BTN_YELLOW);
+      saveTouchCalibration(newXmin, newXmax, newYmin, newYmax);
+      tft.fillScreen(ILI9341_BLACK);
+      tft.setCursor(10, 10);
+      tft.println("Calibration saved.");
+      delay(1500);
+      return;
+    }
+    if (digitalRead(BTN_GREEN) == LOW) {
+      waitForRelease(BTN_GREEN);
+      X_raw_min = oldXmin; X_raw_max = oldXmax; Y_raw_min = oldYmin; Y_raw_max = oldYmax;
+      tft.fillScreen(ILI9341_BLACK);
+      tft.setCursor(10, 10);
+      tft.println("Discarded -- previous calibration kept.");
+      delay(1500);
+      return;
+    }
+    if (touch.touched()) {
+      TS_Point p = touch.getPoint();
+      if (!isInvalidTouch(p)) {
+        int16_t sx, sy;
+        mapTouch(p, sx, sy);
+        tft.fillCircle(sx, sy, 4, ILI9341_GREEN);
+      }
+    }
+    delay(15);
+  }
+}
+
 // Reached via the mode picker's 4th box. Same blocking tap-driven picker
 // style as selectMode()/selectFloorplan(); loops so Green (or picking
 // "Back") returns to the main mode picker rather than this submenu
 // re-showing itself.
 void showMoreMenu() {
-  const int boxTop = 50;
-  const int boxH = 55;
-  const int boxGap = 10;
-  const int NUM_BOXES = 3;
-  const char* labels[NUM_BOXES] = { "Diagnostics", "File Browser", "Back" };
+  const int boxTop = 30;
+  const int boxH = 46;
+  const int boxGap = 8;
+  const int NUM_BOXES = 4;
+  const char* labels[NUM_BOXES] = { "Diagnostics", "Touch Calibration", "File Browser", "Back" };
 
   while (true) {
     tft.fillScreen(ILI9341_BLACK);
@@ -3215,6 +3411,8 @@ void showMoreMenu() {
     if (choice == 0) {
       showDiagnosticsScreen();
     } else if (choice == 1) {
+      runTouchCalibration();
+    } else if (choice == 2) {
       showFileBrowserScreen();
     } else {
       return;   // back to the main mode picker
